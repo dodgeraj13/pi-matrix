@@ -272,6 +272,14 @@ class Runner:
         self.picture_proc = self._stop("picture", self.picture_proc)
         self.drawing_proc = self._stop("drawing", self.drawing_proc)
         self.text_proc    = self._stop("text", self.text_proc)
+        # Remove stale heartbeat files so the watchdog doesn't immediately
+        # kill a freshly-started process because the old run left a stale file.
+        for m in range(1, 9):
+            hb = heartbeat_path(m)
+            try:
+                os.remove(hb)
+            except FileNotFoundError:
+                pass
 
     def apply_mode(self, m: int):
         if m == self.mode:
@@ -408,7 +416,7 @@ def fetch_state():
         print(f"[agent] poll error: {e}", flush=True)
     return None
 
-async def watchdog_loop(runner: Runner, interval=5, stall_s=15):
+async def watchdog_loop(runner: Runner, interval=5, stall_s=60):
     # checks: process alive AND heartbeat fresh
     while True:
         try:
