@@ -464,10 +464,11 @@ def main():
     print(f"[weather] using fonts -> clock: {clock_path}, curr: {curr_path}, small: {small_path}", flush=True)
 
     last_fetch = 0.0
-    last_hb = 0.0
+    last_hb    = 0.0
+    last_drawn_minute = -1   # track which minute is currently on screen
+    weather_dirty = True     # force a draw on startup
     cache = None
     interval = max(60, int(args.update_interval))
-    frame_ctr = 0
 
     try:
         while True:
@@ -483,10 +484,10 @@ def main():
                 last_hb = now
 
             # Fetch weather periodically
-            if now - last_fetch > interval or not cache:
+            if now - last_fetch > interval or cache is None:
                 try:
                     cache = fetch_weather(cfg)
-                    # Write weather data to file for frontend preview
+                    weather_dirty = True
                     try:
                         import json
                         with open("/tmp/weather.json", "w") as wf:
@@ -502,17 +503,19 @@ def main():
                 finally:
                     last_fetch = now
 
-            try:
-                draw_frame(off, fonts, cache or {})
-                off = matrix.SwapOnVSync(off)  # reuse returned buffer
-            except Exception as e:
-                sys.stderr.write("[weather] draw error: %s\n" % e)
+            # Only redraw when the displayed minute changes or new weather arrived.
+            # The display is otherwise static — redrawing every 80ms just causes flicker.
+            current_minute = int(now) // 60
+            if weather_dirty or current_minute != last_drawn_minute:
+                try:
+                    draw_frame(off, fonts, cache or {})
+                    off = matrix.SwapOnVSync(off)
+                    last_drawn_minute = current_minute
+                    weather_dirty = False
+                except Exception as e:
+                    sys.stderr.write("[weather] draw error: %s\n" % e)
 
-            frame_ctr += 1
-            if frame_ctr % 1800 == 0:
-                gc.collect()
-
-            time.sleep(0.08)
+            time.sleep(1.0)   # 1-second tick is plenty for a static weather display
     except KeyboardInterrupt:
         pass
 
