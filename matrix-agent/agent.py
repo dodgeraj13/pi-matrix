@@ -278,7 +278,12 @@ class Runner:
             hb = heartbeat_path(m)
             try:
                 os.remove(hb)
-            except FileNotFoundError:
+            except (FileNotFoundError, PermissionError):
+                # FileNotFoundError: already gone — fine
+                # PermissionError: file was written by the root display process;
+                # we can't delete it, but with stall_s=90 the watchdog gives
+                # enough time for the new process to write its first heartbeat
+                # before we declare it stale.
                 pass
 
     def apply_mode(self, m: int):
@@ -416,7 +421,7 @@ def fetch_state():
         print(f"[agent] poll error: {e}", flush=True)
     return None
 
-async def watchdog_loop(runner: Runner, interval=5, stall_s=60):
+async def watchdog_loop(runner: Runner, interval=5, stall_s=90):
     # checks: process alive AND heartbeat fresh
     while True:
         try:
