@@ -310,6 +310,22 @@ class Runner:
         if self._is_running(self.text_proc):
             self.text_proc = self._stop("text", self.text_proc); self._start_text()
 
+    def _force_restart(self):
+        """Kill whatever is running and restart the current mode with current settings."""
+        if self.mode == 0:
+            return
+        print(f"[agent] force-restarting mode {self.mode}", flush=True)
+        self._kill_all()
+        m = self.mode
+        if   m == 1: self._start_mlb()
+        elif m == 2: self._start_music()
+        elif m == 3: self._start_clock()
+        elif m == 4: self._start_weather()
+        elif m == 5: self._start_picture()
+        elif m == 6: self._start_drawing()
+        elif m == 7: self._start_text()
+        elif m == 8: self._start_music()
+
     def apply_rotation(self, r: int):
         r = int(r)
         if r not in (0, 90, 180, 270):
@@ -318,12 +334,11 @@ class Runner:
             return
         print(f"[agent] rotation {self.rotation} -> {r}", flush=True)
         self.rotation = r
-        # restart current app to apply mapper
-        self.apply_mode(self.mode)
+        self._force_restart()
 
     def restart_current(self):
         # helper: restart current mode (used by watchdog)
-        self.apply_mode(self.mode)
+        self._force_restart()
 
 def fetch_and_write_mlb_config():
     """Fetch MLB config from backend and write to local config files."""
@@ -355,6 +370,30 @@ def fetch_and_write_mlb_config():
 
     except Exception as e:
         print(f"[agent] MLB config fetch error: {e}", flush=True)
+
+
+def _do_update():
+    """Pull latest code from git and reboot if anything changed."""
+    try:
+        repo_dir = str(BASE.parent)
+        print(f"[agent] checking for updates in {repo_dir}", flush=True)
+        result = subprocess.run(
+            ["git", "-C", repo_dir, "pull"],
+            capture_output=True, text=True, timeout=60
+        )
+        output = result.stdout.strip()
+        print(f"[agent] git pull: {output}", flush=True)
+        if result.returncode != 0:
+            print(f"[agent] git pull failed: {result.stderr.strip()}", flush=True)
+            return
+        if "Already up to date." in output:
+            print("[agent] already up to date — no reboot needed", flush=True)
+        else:
+            print("[agent] changes pulled — rebooting in 3 seconds...", flush=True)
+            time.sleep(3)
+            subprocess.run(["sudo", "reboot"], check=False)
+    except Exception as e:
+        print(f"[agent] update error: {e}", flush=True)
 
 
 def fetch_state():
@@ -429,6 +468,9 @@ async def ws_loop():
                         if "mode" in data: runner.apply_mode(int(data["mode"]))
                         if "brightness" in data: runner.apply_brightness(int(data["brightness"]))
                         if "rotation" in data: runner.apply_rotation(int(data["rotation"]))
+                        if data.get("force"): runner._force_restart()
+                    elif data.get("type") == "cmd" and data.get("cmd") == "update":
+                        _do_update()
         except Exception as e:
             print(f"[agent] ws error: {e}", flush=True)
             # short poll during backoff
