@@ -43,6 +43,8 @@ class Runner:
         self.mode = 0
         self.brightness = 60
         self.rotation = 0  # 0,90,180,270
+        self.location = ""          # e.g. "Chicago, IL" — set from /settings
+        self.units = "imperial"     # "imperial" | "metric"
         self.mlb_proc: subprocess.Popen | None = None
         self.music_proc: subprocess.Popen | None = None
         self.clock_proc: subprocess.Popen | None = None
@@ -75,11 +77,15 @@ class Runner:
         return []
 
     def _child_env(self):
-        # unbuffered logs; stable HOME/CACHE
+        # unbuffered logs; stable HOME/CACHE; inject weather settings
         env = os.environ.copy()
         env["HOME"] = HOME_DIR
         env["XDG_CACHE_HOME"] = f"{HOME_DIR}/.cache"
         env["PYTHONUNBUFFERED"] = "1"
+        if self.location:
+            env["WEATHER_LOCATION"] = self.location
+        if self.units:
+            env["WEATHER_UNITS"] = self.units
         return env
 
     def _write_music_ini(self):
@@ -118,7 +124,7 @@ class Runner:
     def _start_mlb(self):
         if self._is_running(self.mlb_proc): return
         try:
-            fetch_and_write_mlb_config()
+            fetch_and_write_mlb_config(self)
             print("[agent] starting MLB ...", flush=True)
             # Use the venv python + explicit script path so we don't depend on
             # main.py having the execute bit or a working shebang.
@@ -353,8 +359,22 @@ class Runner:
         # helper: restart current mode (used by watchdog)
         self._force_restart()
 
-def fetch_and_write_mlb_config():
-    """Fetch MLB config from backend and write to local config files."""
+def fetch_device_settings() -> dict:
+    """Fetch per-device settings (location, units, etc.) from backend."""
+    if not BACKEND_BASE or not HEADERS:
+        return {}
+    try:
+        r = requests.get(f"{BACKEND_BASE}/settings", headers=HEADERS, timeout=5)
+        if r.ok:
+            return r.json()
+    except Exception as e:
+        print(f"[agent] settings fetch error: {e}", flush=True)
+    return {}
+
+
+def fetch_and_write_mlb_config(runner: "Runner | None" = None):
+    """Fetch MLB config from backend and write to local config files.
+    Also patches weather.location / weather.apikey from device settings."""
     if not BACKEND_BASE or not HEADERS:
         return
     try:
@@ -364,9 +384,19 @@ def fetch_and_write_mlb_config():
             return
         data = r.json()
 
-        # Write config.json
-        config = data.get("config")
+        # Write config.json — patch weather block with device location + API key
+        config = data.get("config") or {}
         if config:
+            weather_api_key = os.getenv("WEATHER_API_KEY", "")
+            location = (runner.location if runner else "") or os.getenv("WEATHER_LOCATION", "")
+            units = (runner.units if runner else "imperial") or "imperial"
+            if "weather" not in config or not isinstance(config["weather"], dict):
+                config["weather"] = {}
+            if weather_api_key:
+                config["weather"]["apikey"] = weather_api_key
+            if location:
+                config["weather"]["location"] = location
+            config["weather"]["metric_units"] = (units == "metric")
             config_path = os.path.join(MLB_DIR, "config.json")
             with open(config_path, "w") as f:
                 json.dump(config, f, indent="\t")
@@ -452,8 +482,28 @@ async def watchdog_loop(runner: Runner, interval=5, stall_s=90):
             print(f"[agent] watchdog error: {e}", flush=True)
         await asyncio.sleep(interval)
 
+def _apply_settings(runner: Runner, settings: dict):
+    """Apply fetched device settings (location, units) to the runner."""
+    changed = False
+    loc = settings.get("location", "").strip()
+    units = settings.get("units", "imperial").strip() or "imperial"
+    if loc != runner.location:
+        runner.location = loc
+        changed = True
+        print(f"[agent] location set to {loc!r}", flush=True)
+    if units != runner.units:
+        runner.units = units
+        changed = True
+        print(f"[agent] units set to {units!r}", flush=True)
+    return changed
+
+
 async def ws_loop():
     runner = Runner()
+
+    # Load device settings (location, units) before starting modes
+    settings = await asyncio.get_event_loop().run_in_executor(None, fetch_device_settings)
+    _apply_settings(runner, settings)
 
     # initial sync
     s = fetch_state()
@@ -482,6 +532,11 @@ async def ws_loop():
                         if "brightness" in data: runner.apply_brightness(int(data["brightness"]))
                         if "rotation" in data: runner.apply_rotation(int(data["rotation"]))
                         if data.get("force"): runner._force_restart()
+                    elif data.get("type") == "settings":
+                        changed = _apply_settings(runner, data)
+                        if changed and runner.mode in (1, 4):
+                            # Restart weather or MLB so new location takes effect
+                            runner._force_restart()
                     elif data.get("type") == "cmd" and data.get("cmd") == "update":
                         _do_update()
         except Exception as e:
