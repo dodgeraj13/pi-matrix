@@ -120,9 +120,13 @@ class Runner:
         try:
             fetch_and_write_mlb_config()
             print("[agent] starting MLB ...", flush=True)
-            os.chdir(MLB_DIR)
+            # Use the venv python + explicit script path so we don't depend on
+            # main.py having the execute bit or a working shebang.
+            mlb_py = os.path.join(MLB_DIR, "venv", "bin", "python3")
+            if not os.path.exists(mlb_py):
+                mlb_py = sys.executable
             cmd = [
-                "sudo","-n","./main.py",
+                "sudo","-n", mlb_py, os.path.join(MLB_DIR, "main.py"),
                 "--led-rows=64","--led-cols=64",
                 "--led-gpio-mapping=adafruit-hat-pwm",
                 f"--led-brightness={self.brightness}",
@@ -131,7 +135,7 @@ class Runner:
             # MLB tool rotates internally via --led-pixel-mapper if supported:
             if self.rotation in (90,180,270):
                 cmd.append(f"--led-pixel-mapper=Rotate:{self.rotation}")
-            self.mlb_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
+            self.mlb_proc = subprocess.Popen(cmd, cwd=MLB_DIR, start_new_session=True, env=self._child_env())
         except Exception as e:
             print(f"[agent] MLB start error: {e}", flush=True)
             self.mlb_proc = None
