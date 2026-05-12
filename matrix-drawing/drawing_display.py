@@ -31,6 +31,7 @@ _cached_img: Image.Image | None = None  # 64x64 RGB, ready to blit
 def parse_args():
     ap = argparse.ArgumentParser(prog="MatrixDrawing")
     ap.add_argument("--api-base", required=True, help="e.g. https://matrix-backend-xxx.onrender.com")
+    ap.add_argument("--device-token", default="", help="Device UUID token for multi-device backend")
     ap.add_argument("--brightness", type=int, default=None)
     ap.add_argument("--hardware-mapping", type=str, default="adafruit-hat-pwm")
     ap.add_argument("--gpio-slowdown", type=int, default=2)
@@ -59,7 +60,7 @@ def _scale_to_64(rgb_img: Image.Image) -> Image.Image:
     canvas.paste(resized, (off_x, off_y))
     return canvas
 
-def fetch_if_changed(api_base: str):
+def fetch_if_changed(api_base: str, device_token: str = ""):
     """
     If /image ETag changed, download once and update the cached 64x64 image.
     """
@@ -67,6 +68,8 @@ def fetch_if_changed(api_base: str):
     r = None
     try:
         headers = {"Accept": "image/png"}
+        if device_token:
+            headers["X-Device-Token"] = device_token
         if _cached_etag:
             headers["If-None-Match"] = _cached_etag
 
@@ -143,7 +146,7 @@ def main():
 
         # Poll backend for image at most ~4/sec (or slower if you want)
         if now - last_poll > 0.25:
-            fetch_if_changed(args.api_base)
+            fetch_if_changed(args.api_base, args.device_token)
             last_poll = now
 
         # Heartbeat every 30s so agent can monitor mode 6

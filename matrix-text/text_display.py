@@ -56,6 +56,7 @@ FONT_DIR = "/home/pi_two/rpi-spotify-matrix-display/rpi-rgb-led-matrix/fonts"
 def parse_args():
     ap = argparse.ArgumentParser(prog="MatrixText")
     ap.add_argument("--api-base", required=True, help="e.g. https://matrix-backend-xxx.onrender.com")
+    ap.add_argument("--device-token", default="", help="Device UUID token for multi-device backend")
     ap.add_argument("--brightness", type=int, default=None)
     ap.add_argument("--hardware-mapping", type=str, default="adafruit-hat-pwm")
     ap.add_argument("--gpio-slowdown", type=int, default=2)
@@ -208,11 +209,13 @@ def render_text_frame(text_config: dict, scroll_offset: int = 0) -> Image.Image:
 
         return canvas
 
-def fetch_text_config(api_base: str):
+def fetch_text_config(api_base: str, device_token: str = ""):
     """Fetch text configuration from backend"""
     global _text_config, _cached_etag
     try:
         headers = {}
+        if device_token:
+            headers["X-Device-Token"] = device_token
         if _cached_etag:
             headers["If-None-Match"] = _cached_etag
 
@@ -259,7 +262,7 @@ def main():
     scroll_offset = 0
 
     # Initial fetch
-    fetch_text_config(args.api_base)
+    fetch_text_config(args.api_base, args.device_token)
 
     print("[text] starting text display", flush=True)
 
@@ -268,7 +271,7 @@ def main():
 
         # Poll backend for text config every 2 seconds
         if now - last_config_poll > 2.0:
-            fetch_text_config(args.api_base)
+            fetch_text_config(args.api_base, args.device_token)
             last_config_poll = now
 
         # Heartbeat every 30s

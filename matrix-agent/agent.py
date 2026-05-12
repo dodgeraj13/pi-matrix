@@ -10,9 +10,11 @@ from dotenv import load_dotenv
 BASE = Path(__file__).resolve().parent
 load_dotenv(BASE / ".env")
 
-API_TOKEN    = os.getenv("API_TOKEN", "")  # Required: Set in .env file
+API_TOKEN    = os.getenv("API_TOKEN", "")
+DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "")  # Per-device UUID token
 BACKEND_BASE = (os.getenv("BACKEND_BASE") or os.getenv("SERVER_URL") or "").rstrip("/")
-WS_URL       = os.getenv("WS_URL") or (BACKEND_BASE.replace("https://","wss://").replace("http://","ws://") + "/ws")
+_ws_base     = os.getenv("WS_URL") or (BACKEND_BASE.replace("https://","wss://").replace("http://","ws://") + "/ws")
+WS_URL       = f"{_ws_base}?device={DEVICE_TOKEN}" if DEVICE_TOKEN and "?device=" not in _ws_base else _ws_base
 
 MLB_DIR      = os.getenv("MLB_DIR", "/home/pi_two/mlb-led-scoreboard")
 MUSIC_DIR    = os.getenv("MUSIC_DIR", "/home/pi_two/rpi-spotify-matrix-display")
@@ -23,7 +25,11 @@ PICTURE_DIR  = os.getenv("PICTURE_DIR", "/home/pi_two/matrix-picture")
 DRAWING_DIR  = os.getenv("DRAWING_DIR", "/home/pi_two/matrix-drawing")
 TEXT_DIR     = os.getenv("TEXT_DIR", "/home/pi_two/matrix-text")
 
-HEADERS = {"Authorization": f"Bearer {API_TOKEN}"} if API_TOKEN else {}
+HEADERS = {}
+if DEVICE_TOKEN:
+    HEADERS["X-Device-Token"] = DEVICE_TOKEN
+elif API_TOKEN:
+    HEADERS["Authorization"] = f"Bearer {API_TOKEN}"
 
 def heartbeat_path(mode:int) -> str:
     return f"/tmp/matrix-heartbeat-{mode}"
@@ -195,6 +201,7 @@ class Runner:
                 "--gpio-slowdown","2",
                 "--brightness", str(self.brightness),
                 *self._pixel_mapper(),
+                *(["--device-token", DEVICE_TOKEN] if DEVICE_TOKEN else []),
             ]
             self.picture_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
         except Exception as e:
@@ -216,6 +223,7 @@ class Runner:
                 "--gpio-slowdown","2",
                 "--brightness", str(self.brightness),
                 *self._pixel_mapper(),
+                *(["--device-token", DEVICE_TOKEN] if DEVICE_TOKEN else []),
             ]
             self.drawing_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
         except Exception as e:
@@ -237,6 +245,7 @@ class Runner:
                 "--gpio-slowdown","2",
                 "--brightness", str(self.brightness),
                 *self._pixel_mapper(),
+                *(["--device-token", DEVICE_TOKEN] if DEVICE_TOKEN else []),
             ]
             self.text_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
         except Exception as e:
