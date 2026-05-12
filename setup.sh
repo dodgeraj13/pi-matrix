@@ -146,12 +146,17 @@ section "Building rpi-rgb-led-matrix LED driver"
 # Strategy: build a wheel once, then install it into every venv that needs it.
 
 MATRIX_SRC="$HOME_DIR/rpi-rgb-led-matrix"
+# Pin to last commit before Pi 5 RP1 backend was added (commit e947417f, 2026-04-13).
+# Master as of 2026-04-30 includes rp1_rio_backend.cc which uses 64-bit ARM instructions
+# that fail to compile on 32-bit armhf (Pi 3/4).  This SHA works on all Pi models.
+MATRIX_SHA="e947417f"
 if [[ -d "$MATRIX_SRC/.git" ]]; then
-    info "rpi-rgb-led-matrix already cloned — resetting to master..."
+    info "rpi-rgb-led-matrix already cloned — fetching and pinning to $MATRIX_SHA..."
     git -C "$MATRIX_SRC" fetch origin
-    git -C "$MATRIX_SRC" reset --hard origin/master
+    git -C "$MATRIX_SRC" checkout "$MATRIX_SHA"
 else
     git clone https://github.com/hzeller/rpi-rgb-led-matrix.git "$MATRIX_SRC"
+    git -C "$MATRIX_SRC" checkout "$MATRIX_SHA"
 fi
 
 info "Building rgbmatrix wheel (takes a few minutes — cmake + Cython compile)..."
