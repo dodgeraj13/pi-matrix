@@ -158,8 +158,9 @@ def simplify_coords(coords, max_points=60):
 def bbox_center_zoom(coords, tile_px=64):
     """Calculate Mapbox center lon/lat and integer zoom to fit all coords.
 
-    Uses the Web Mercator tile formula so the whole route fits in the tile
-    with a small padding border.
+    Mapbox uses 512px tiles at zoom 0.  For a tile_px-wide image:
+      zoom = log2(tile_px * 360 / (512 * lon_span_deg))
+    Latitude uses the Mercator cos() correction for accuracy.
     """
     import math
     lons = [c[0] for c in coords]
@@ -167,7 +168,7 @@ def bbox_center_zoom(coords, tile_px=64):
     min_lon, max_lon = min(lons), max(lons)
     min_lat, max_lat = min(lats), max(lats)
 
-    # 15 % padding on each side
+    # 18 % padding on each side so the pins aren't clipped
     pad_lon = max((max_lon - min_lon) * 0.18, 0.005)
     pad_lat = max((max_lat - min_lat) * 0.18, 0.005)
     min_lon -= pad_lon; max_lon += pad_lon
@@ -176,12 +177,18 @@ def bbox_center_zoom(coords, tile_px=64):
     center_lon = (min_lon + max_lon) / 2
     center_lat = (min_lat + max_lat) / 2
 
-    # Zoom that fits the bbox width in tile_px pixels (Mercator tiles are 512px at z0 in Mapbox)
     lon_span = max_lon - min_lon
     lat_span = max_lat - min_lat
-    zoom_lon = math.log2(360 / lon_span) if lon_span > 0 else 14
-    zoom_lat = math.log2(170 / lat_span) if lat_span > 0 else 14
-    zoom = max(1, min(14, int(min(zoom_lon, zoom_lat))))
+
+    # Mercator latitude compression at the centre latitude
+    lat_cos = math.cos(math.radians(center_lat))
+
+    # zoom = log2(tile_px / 512 * 360 / lon_span)
+    #       (tile_px/512 is the fraction of a full Mapbox tile we're filling)
+    zoom_lon = math.log2(tile_px * 360 / (512 * lon_span)) if lon_span > 0 else 10
+    zoom_lat = math.log2(tile_px * 360 * lat_cos / (512 * lat_span)) if lat_span > 0 else 10
+
+    zoom = max(1, min(14, math.floor(min(zoom_lon, zoom_lat))))
 
     return center_lon, center_lat, zoom
 
