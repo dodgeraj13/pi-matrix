@@ -79,7 +79,7 @@ SUBMODE_INTERVAL   = 9     # seconds before switching between Basic and Map View
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 OSRM      = "http://router.project-osrm.org/route/v1/driving"
 OWM       = "https://api.openweathermap.org/data/2.5/weather"
-MAPBOX    = "https://api.mapbox.com/styles/v1/mapbox/traffic-day-v2/static"
+MAPBOX    = "https://api.mapbox.com/styles/v1/mapbox/navigation-night-v1/static"
 
 
 def geocode(address: str):
