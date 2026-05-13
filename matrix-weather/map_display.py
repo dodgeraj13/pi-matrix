@@ -29,7 +29,7 @@ Args (passed by agent):
   --pixel-mapper  e.g. Rotate:90
 """
 
-import argparse, io, os, sys, time
+import argparse, io, os, sys, time, threading
 
 import requests
 
@@ -584,16 +584,82 @@ def main():
     }
     scrollers = {"dest": Scroller()}
 
-    data            = {"loading": True, "dest_name": MAP_ADDRESS_B}
-    last_fetch      = 0.0
-    last_hb         = 0.0
-    last_map_fetch  = 0.0
-    MAP_REFRESH     = 300   # re-fetch map tile every 5 min (traffic updates)
+    data           = {"loading": True, "dest_name": MAP_ADDRESS_B}
+    data_lock      = threading.Lock()
+    fetching       = [False]   # full data refresh in progress
+    map_fetching   = [False]   # map tile refresh in progress
+    last_fetch     = 0.0
+    last_hb        = 0.0
+    last_map_fetch = 0.0
+    MAP_REFRESH    = 300   # re-fetch map tile every 5 min (traffic updates)
     # submode cycling: 0 = Basic screen, 1 = Map View screen
-    # MAP_SUBMODE env controls whether we cycle, pin to basic, or pin to map
-    submode         = 0 if MAP_SUBMODE != "map" else 1
-    last_switch     = 0.0
+    submode        = 0 if MAP_SUBMODE != "map" else 1
+    last_switch    = 0.0
     print(f"[map] submode={MAP_SUBMODE!r}", flush=True)
+
+    # ── Background workers (never block the render loop) ──────────────────
+    def _bg_full_refresh():
+        try:
+            geo_a = geocode(MAP_ADDRESS_A)
+            geo_b = geocode(MAP_ADDRESS_B)
+            if geo_a and geo_b:
+                la, lna, _      = geo_a
+                lb, lnb, name_b = geo_b
+                dur, route_coords, route_colors = get_route(la, lna, lb, lnb)
+                wx  = get_weather(lb, lnb, WEATHER_UNITS)
+                map_img = None
+                if MAPBOX_TOKEN and HAS_PIL and route_coords:
+                    map_img = fetch_map_image(route_coords, route_colors)
+                new_data = {
+                    "dest_name":    name_b,
+                    "duration":     dur,
+                    "weather":      wx,
+                    "units":        WEATHER_UNITS,
+                    "loading":      False,
+                    "error":        "" if wx else "weather err",
+                    "map_img":      map_img,
+                    "route_coords": route_coords,
+                    "route_colors": route_colors,
+                }
+                print(
+                    f"[map] {name_b} | drive={fmt_duration(dur)} | wx={wx}"
+                    f" | map_img={'yes' if map_img else 'no'}",
+                    flush=True,
+                )
+            else:
+                new_data = {
+                    "dest_name": MAP_ADDRESS_B,
+                    "loading":   False,
+                    "error":     "geocode failed",
+                    "map_img":   None,
+                }
+                print("[map] geocode failed", flush=True)
+            with data_lock:
+                data.clear()
+                data.update(new_data)
+        except Exception as e:
+            print(f"[map] fetch exception: {e}", flush=True)
+            with data_lock:
+                data["loading"] = False
+                data.setdefault("error", str(e))
+        finally:
+            fetching[0] = False
+
+    def _bg_map_refresh():
+        try:
+            with data_lock:
+                route_coords = data.get("route_coords")
+                route_colors = data.get("route_colors", [])
+            if route_coords:
+                new_img = fetch_map_image(route_coords, route_colors)
+                if new_img:
+                    with data_lock:
+                        data["map_img"] = new_img
+                    print("[map] map tile refreshed", flush=True)
+        except Exception as e:
+            print(f"[map] map refresh error: {e}", flush=True)
+        finally:
+            map_fetching[0] = False
 
     while True:
         now = time.time()
@@ -607,65 +673,27 @@ def main():
                 pass
             last_hb = now
 
-        # ── Fetch / refresh data ──────────────────────────────────────────
-        if now - last_fetch >= UPDATE_INTERVAL:
-            last_fetch = now
-            try:
-                geo_a = geocode(MAP_ADDRESS_A)
-                geo_b = geocode(MAP_ADDRESS_B)
-                if geo_a and geo_b:
-                    la, lna, _      = geo_a
-                    lb, lnb, name_b = geo_b
+        # ── Full data refresh (background thread) ─────────────────────────
+        if not fetching[0] and now - last_fetch >= UPDATE_INTERVAL:
+            last_fetch   = now
+            fetching[0]  = True
+            threading.Thread(target=_bg_full_refresh, daemon=True).start()
 
-                    dur, route_coords, route_colors = get_route(la, lna, lb, lnb)
-                    wx                              = get_weather(lb, lnb, WEATHER_UNITS)
-
-                    # Fetch map image if Mapbox is configured
-                    map_img = None
-                    if MAPBOX_TOKEN and HAS_PIL and route_coords:
-                        map_img = fetch_map_image(route_coords, route_colors)
-
-                    data = {
-                        "dest_name":    name_b,
-                        "duration":     dur,
-                        "weather":      wx,
-                        "units":        WEATHER_UNITS,
-                        "loading":      False,
-                        "error":        "" if wx else "weather err",
-                        "map_img":      map_img,
-                        "route_coords": route_coords,
-                        "route_colors": route_colors,
-                    }
-                    print(
-                        f"[map] {name_b} | drive={fmt_duration(dur)} | wx={wx} "
-                        f"| map_img={'yes' if map_img else 'no'}",
-                        flush=True,
-                    )
-                else:
-                    data = {
-                        "dest_name": MAP_ADDRESS_B,
-                        "loading":   False,
-                        "error":     "geocode failed",
-                        "map_img":   None,
-                    }
-                    print("[map] geocode failed", flush=True)
-            except Exception as e:
-                print(f"[map] fetch exception: {e}", flush=True)
-                data["loading"] = False
-                data.setdefault("error", str(e))
-
-        # ── Map tile refresh (traffic updates every 5 min) ───────────────
-        if (MAPBOX_TOKEN and HAS_PIL
-                and data.get("route_coords")
+        # ── Map tile refresh (background thread) ──────────────────────────
+        if (not map_fetching[0]
+                and MAPBOX_TOKEN and HAS_PIL
                 and not data.get("loading")
+                and data.get("route_coords")
                 and now - last_map_fetch >= MAP_REFRESH):
-            new_img = fetch_map_image(data["route_coords"], data.get("route_colors", []))
-            if new_img:
-                data["map_img"] = new_img
-            last_map_fetch = now
+            last_map_fetch    = now
+            map_fetching[0]   = True
+            threading.Thread(target=_bg_map_refresh, daemon=True).start()
 
         # ── Submode cycling ───────────────────────────────────────────────
-        map_view_available = MAPBOX_TOKEN and HAS_PIL and data.get("map_img") is not None
+        with data_lock:
+            frame = dict(data)   # snapshot — render from copy, never hold lock during blit
+
+        map_view_available = MAPBOX_TOKEN and HAS_PIL and frame.get("map_img") is not None
         if MAP_SUBMODE == "basic":
             submode = 0
         elif MAP_SUBMODE == "map":
@@ -681,12 +709,12 @@ def main():
 
         # ── Render ────────────────────────────────────────────────────────
         if submode == 1:
-            draw_map_view(offscreen, data)
+            draw_map_view(offscreen, frame)
         else:
-            draw_basic(offscreen, fonts, data, scrollers, now)
+            draw_basic(offscreen, fonts, frame, scrollers, now)
 
         offscreen = matrix.SwapOnVSync(offscreen)
-        time.sleep(0.05)  # ~20fps for smooth scrolling
+        time.sleep(0.05)  # ~20 fps for smooth scrolling
 
 
 if __name__ == "__main__":
