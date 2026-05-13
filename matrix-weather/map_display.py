@@ -29,8 +29,7 @@ Args (passed by agent):
   --pixel-mapper  e.g. Rotate:90
 """
 
-import argparse, io, json, os, sys, time
-from urllib.parse import quote
+import argparse, io, os, sys, time
 
 import requests
 
@@ -198,12 +197,17 @@ def bbox_center_zoom(coords, tile_px=64):
 def dark_traffic_filter(img):
     """Post-process a Mapbox traffic-night-v2 tile into true dark mode.
 
-    Keeps only:
-      - Traffic-coloured road pixels (red / amber / green)
-      - Water pixels (blue hue)
-    Everything else (background, labels, non-traffic roads) → pure black.
+    Pass 1 — HSV colour gate:
+      Keeps traffic-coloured roads (red/amber/green) and water (blue).
+      Everything else → black (removes background, non-traffic roads).
 
-    Uses numpy for fast vectorised HSV conversion.
+    Pass 2 — morphological erosion (×2):
+      Any coloured pixel that doesn't have ≥3 coloured neighbours is
+      zeroed out.  City-name labels are thin isolated clusters (survive
+      the colour gate but fail the connectivity test); road lines are
+      wide continuous stripes and survive.
+
+    Uses numpy for vectorised speed.
     """
     try:
         import numpy as np
@@ -211,13 +215,11 @@ def dark_traffic_filter(img):
         r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
 
         cmax  = np.maximum(np.maximum(r, g), b)
-        cmin  = np.minimum(np.minimum(r, g), b)
+        cmin  = np.minimum(np.minimum(r, g), b)  # noqa: F841
         delta = cmax - cmin
 
-        # Saturation (HSV)
         sat = np.where(cmax > 1e-6, delta / cmax, 0.0)
 
-        # Hue 0-1  (only meaningful where delta > 0)
         eps = 1e-6
         hue = np.zeros_like(r)
         mr = (cmax == r) & (delta > eps)
@@ -227,19 +229,25 @@ def dark_traffic_filter(img):
         hue[mg] = ((b[mg] - r[mg]) / (delta[mg] + eps) + 2) / 6
         hue[mb] = ((r[mb] - g[mb]) / (delta[mb] + eps) + 4) / 6
 
-        # Traffic colours (fairly broad to survive JPEG compression)
-        is_red    = ((hue < 0.06) | (hue > 0.93)) & (sat > 0.30) & (cmax > 0.18)
-        is_amber  = (hue > 0.07) & (hue < 0.21) & (sat > 0.30) & (cmax > 0.18)
-        is_green  = (hue > 0.24) & (hue < 0.46) & (sat > 0.22) & (cmax > 0.18)
-        # Water — blue hue, lower saturation threshold
-        is_water  = (hue > 0.50) & (hue < 0.72) & (sat > 0.12) & (cmax > 0.08)
+        is_red   = ((hue < 0.06) | (hue > 0.93)) & (sat > 0.30) & (cmax > 0.18)
+        is_amber = (hue > 0.07) & (hue < 0.21)   & (sat > 0.40) & (cmax > 0.18)
+        is_green = (hue > 0.24) & (hue < 0.46)   & (sat > 0.22) & (cmax > 0.18)
+        is_water = (hue > 0.50) & (hue < 0.72)   & (sat > 0.12) & (cmax > 0.08)
 
         keep = is_red | is_amber | is_green | is_water
 
-        result        = np.zeros_like(arr)
-        result[keep]  = arr[keep]
-        # Slightly boost water so it reads clearly on the LED panel
-        result[is_water] = np.clip(arr[is_water] * 1.6, 0, 1)
+        # Morphological erosion — 2 passes, need ≥3 neighbours to survive
+        for _ in range(2):
+            kf  = keep.astype(np.float32)
+            pad = np.pad(kf, 1, mode='constant', constant_values=0)
+            nbr = (pad[:-2,:-2] + pad[:-2,1:-1] + pad[:-2,2:] +
+                   pad[1:-1,:-2]                 + pad[1:-1,2:] +
+                   pad[2:,:-2]  + pad[2:,1:-1]  + pad[2:,2:])
+            keep = keep & (nbr >= 3)
+
+        result          = np.zeros_like(arr)
+        result[keep]    = arr[keep]
+        result[is_water & keep] = np.clip(arr[is_water & keep] * 1.6, 0, 1)
 
         return Image.fromarray((result * 255).astype(np.uint8))
     except Exception as e:
@@ -247,52 +255,74 @@ def dark_traffic_filter(img):
         return img
 
 
-def fetch_map_image(route_coords):
-    """Fetch a 64×64 Mapbox traffic-night-v2 tile with the route drawn on it.
+# ── PIL route drawing helpers ─────────────────────────────────────────────────
 
-    Fetches at @2x (128×128) for better road detail, then applies the
-    dark_traffic_filter (kills labels & background, keeps traffic colours
-    and water), and finally resizes to 64×64 for the LED matrix.
+def _lonlat_to_px(lon, lat, clon, clat, zoom, tile_px):
+    """Mercator lon/lat → pixel (x, y) within a tile_px-square Mapbox tile."""
+    import math
+    scale = 512 * (2 ** zoom)                        # Mapbox 512-px base tiles
+    px = (lon - clon) * scale / 360 + tile_px / 2
+    def _merc(d): return math.log(math.tan(math.pi / 4 + math.radians(d) / 2))
+    py = -(_merc(lat) - _merc(clat)) * scale / (2 * math.pi) + tile_px / 2
+    return int(round(px)), int(round(py))
+
+
+def _draw_route(img, coords, clon, clat, zoom):
+    """Draw the route polyline + origin/destination circles onto img (in-place)."""
+    from PIL import ImageDraw
+    draw   = ImageDraw.Draw(img)
+    tile   = img.width                               # 128 at @2x
+    pixels = [_lonlat_to_px(c[0], c[1], clon, clat, zoom, tile) for c in coords]
+
+    # Route line — light grey so it's visible but doesn't dominate the traffic colours
+    if len(pixels) >= 2:
+        for i in range(len(pixels) - 1):
+            draw.line([pixels[i], pixels[i+1]], fill=(200, 200, 200), width=2)
+
+    # Origin dot — red with white outline  (r=6 at 128px → ~3px radius on 64px LED)
+    ox, oy = pixels[0]
+    for col, rad in [((255, 255, 255), 7), ((220, 60, 60), 5)]:
+        draw.ellipse([ox-rad, oy-rad, ox+rad, oy+rad], fill=col)
+
+    # Destination dot — green with white outline
+    dx, dy = pixels[-1]
+    for col, rad in [((255, 255, 255), 7), ((60, 210, 90), 5)]:
+        draw.ellipse([dx-rad, dy-rad, dx+rad, dy+rad], fill=col)
+
+
+def fetch_map_image(route_coords):
+    """Fetch a 64×64 Mapbox traffic-night-v2 tile showing live traffic colours.
+
+    Steps:
+      1. Fetch clean tile at @2x (128×128) — no overlay, no attribution logo
+      2. Apply dark_traffic_filter (keeps traffic colours + water, kills labels)
+      3. Draw route polyline + origin/destination dots in PIL
+      4. Resize 128→64 for the LED matrix
     """
     if not HAS_PIL or not MAPBOX_TOKEN or not route_coords:
         return None
     try:
-        simplified = simplify_coords(route_coords)
-
-        # White route line so the driven path is visible on the dark tile
-        geojson = {
-            "type": "Feature",
-            "properties": {
-                "stroke":         "#ffffff",
-                "stroke-width":   2,
-                "stroke-opacity": 0.80,
-            },
-            "geometry": {
-                "type":        "LineString",
-                "coordinates": simplified,
-            },
-        }
-        geojson_enc = quote(json.dumps(geojson, separators=(',', ':')), safe='')
-        overlay     = f"geojson({geojson_enc})"
-
+        simplified       = simplify_coords(route_coords)
         clon, clat, zoom = bbox_center_zoom(simplified)
-        # Request @2x so we get 128×128 for higher-quality downsampling
+
+        # No overlay in URL — route is drawn in PIL after filtering
         url = (
-            f"{MAPBOX}/{overlay}"
+            f"{MAPBOX}"
             f"/{clon:.5f},{clat:.5f},{zoom},0"
-            f"/64x64@2x?access_token={MAPBOX_TOKEN}"
+            f"/64x64@2x"
+            f"?attribution=false&logo=false&access_token={MAPBOX_TOKEN}"
         )
-        r = requests.get(url, timeout=20)
-        if r.status_code == 200:
-            img = Image.open(io.BytesIO(r.content)).convert("RGB")
-            # Apply dark-mode filter (removes labels / background)
-            img = dark_traffic_filter(img)
-            # Downscale 128×128 → 64×64
-            img = img.resize((64, 64), Image.LANCZOS)
-            print(f"[map] Map View image fetched OK (zoom={zoom})", flush=True)
-            return img
-        else:
-            print(f"[map] Mapbox HTTP {r.status_code}: {r.text[:200]}", flush=True)
+        resp = requests.get(url, timeout=20)
+        if resp.status_code != 200:
+            print(f"[map] Mapbox HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
+            return None
+
+        img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+        img = dark_traffic_filter(img)          # black bg, traffic colours only
+        _draw_route(img, simplified, clon, clat, zoom)  # route + endpoint dots
+        img = img.resize((64, 64), Image.LANCZOS)
+        print(f"[map] Map View image fetched OK (zoom={zoom})", flush=True)
+        return img
     except Exception as e:
         print(f"[map] map image error: {e}", flush=True)
     return None
