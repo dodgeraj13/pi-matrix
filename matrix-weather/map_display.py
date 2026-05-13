@@ -3,23 +3,42 @@
 """
 Map mode display (mode 9).
 
-Shows:
-  - Scrolling destination name
-  - Current temperature at destination (large, centered)
-  - Low / High temps
-  - Estimated drive time in large font (via OSRM — free, no key)
+Two alternating screens:
+
+  BASIC  (every ~9 s):
+    - Scrolling destination name
+    - Current temperature at destination (large, centered)
+    - Low / High temps
+    - Estimated drive time in large font
+
+  MAP VIEW (every ~9 s):
+    - Mapbox Static Images API: traffic-day-v2 style, 64×64
+    - Route drawn as GeoJSON overlay (blue line)
+    - Live traffic colours visible underneath
 
 Env vars:
   MAP_ADDRESS_A   origin address  (e.g. "123 Main St, San Francisco, CA")
   MAP_ADDRESS_B   destination     (e.g. "456 Sunset Blvd, Los Angeles, CA")
+  MAP_LABEL_A     friendly label for origin   (e.g. "Home")
+  MAP_LABEL_B     friendly label for destination (e.g. "Work")
   WEATHER_API_KEY OpenWeatherMap API key
   WEATHER_UNITS   imperial | metric   (default: imperial)
+  MAPBOX_TOKEN    Mapbox public token (for Map View submode)
 
 Args (passed by agent):
   --pixel-mapper  e.g. Rotate:90
 """
 
-import argparse, os, sys, time, requests
+import argparse, io, json, os, sys, time
+
+import requests
+
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+    print("[map] Pillow not installed — Map View disabled. Install with: pip install Pillow", flush=True)
 
 # ── Matrix binding path ───────────────────────────────────────────────────────
 _HOME = os.getenv("HOME", "/home/pi_two")
@@ -48,16 +67,19 @@ MAP_ADDRESS_A   = os.getenv("MAP_ADDRESS_A", "").strip()
 MAP_ADDRESS_B   = os.getenv("MAP_ADDRESS_B", "").strip()
 MAP_LABEL_A     = os.getenv("MAP_LABEL_A",   "").strip()   # e.g. "Home"
 MAP_LABEL_B     = os.getenv("MAP_LABEL_B",   "").strip()   # e.g. "Work"
+MAPBOX_TOKEN    = os.getenv("MAPBOX_TOKEN",  "").strip()
 
 HEARTBEAT_FILE     = "/tmp/matrix-heartbeat-9"
-HEARTBEAT_INTERVAL = 30   # seconds
-UPDATE_INTERVAL    = 300  # re-fetch every 5 minutes
-SCROLL_DELAY       = 0.05 # seconds per scroll tick
+HEARTBEAT_INTERVAL = 30    # seconds
+UPDATE_INTERVAL    = 300   # re-fetch data every 5 minutes
+SCROLL_DELAY       = 0.05  # seconds per scroll tick
+SUBMODE_INTERVAL   = 9     # seconds before switching between Basic and Map View
 
 # ── APIs ──────────────────────────────────────────────────────────────────────
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 OSRM      = "http://router.project-osrm.org/route/v1/driving"
 OWM       = "https://api.openweathermap.org/data/2.5/weather"
+MAPBOX    = "https://api.mapbox.com/styles/v1/mapbox/traffic-day-v2/static"
 
 
 def geocode(address: str):
@@ -78,17 +100,27 @@ def geocode(address: str):
     return None
 
 
-def get_drive_time(lat_a, lon_a, lat_b, lon_b):
-    """Return drive duration in seconds via OSRM, or None."""
+def get_route(lat_a, lon_a, lat_b, lon_b):
+    """Return (duration_seconds, route_coords) or (None, None).
+
+    route_coords is a list of [lon, lat] pairs in GeoJSON order.
+    Requests full geometry so we can draw the route on the Mapbox static image.
+    """
     try:
-        url = f"{OSRM}/{lon_a:.6f},{lat_a:.6f};{lon_b:.6f},{lat_b:.6f}?overview=false"
+        url = (
+            f"{OSRM}/{lon_a:.6f},{lat_a:.6f};{lon_b:.6f},{lat_b:.6f}"
+            "?overview=full&geometries=geojson"
+        )
         r = requests.get(url, timeout=15)
         d = r.json()
         if d.get("code") == "Ok":
-            return d["routes"][0]["duration"]
+            route  = d["routes"][0]
+            dur    = route["duration"]
+            coords = route["geometry"]["coordinates"]   # [[lon,lat], ...]
+            return dur, coords
     except Exception as e:
         print(f"[map] routing error: {e}", flush=True)
-    return None
+    return None, None
 
 
 def get_weather(lat, lon, units="imperial"):
@@ -111,6 +143,63 @@ def get_weather(lat, lon, units="imperial"):
     except Exception as e:
         print(f"[map] weather error: {e}", flush=True)
     return None
+
+
+def simplify_coords(coords, max_points=80):
+    """Downsample route coordinate list to at most max_points (for URL length)."""
+    if len(coords) <= max_points:
+        return coords
+    step = len(coords) / max_points
+    sampled = [coords[int(i * step)] for i in range(max_points)]
+    sampled.append(coords[-1])   # always include destination
+    return sampled
+
+
+def fetch_map_image(route_coords):
+    """Fetch a 64×64 Mapbox static map tile with the route overlaid.
+
+    Uses the traffic-day-v2 style so live traffic colours show through.
+    Returns a PIL Image (RGB) or None on failure.
+    """
+    if not HAS_PIL or not MAPBOX_TOKEN or not route_coords:
+        return None
+    try:
+        simplified = simplify_coords(route_coords)
+        geojson_feature = {
+            "type": "Feature",
+            "properties": {
+                "stroke":         "#3399ff",
+                "stroke-width":   2,
+                "stroke-opacity": 0.9,
+            },
+            "geometry": {
+                "type":        "LineString",
+                "coordinates": simplified,
+            },
+        }
+        geojson_str = json.dumps(geojson_feature, separators=(',', ':'))
+        overlay     = f"geojson({geojson_str})"
+        url = f"{MAPBOX}/{overlay}/auto/64x64?padding=5&access_token={MAPBOX_TOKEN}"
+        r = requests.get(url, timeout=20)
+        if r.status_code == 200:
+            img = Image.open(io.BytesIO(r.content)).convert("RGB")
+            img = img.resize((64, 64), Image.LANCZOS)
+            print("[map] Map View image fetched OK", flush=True)
+            return img
+        else:
+            print(f"[map] Mapbox HTTP {r.status_code}: {r.text[:200]}", flush=True)
+    except Exception as e:
+        print(f"[map] map image error: {e}", flush=True)
+    return None
+
+
+def blit_image(canvas, img):
+    """Copy a PIL RGB Image pixel-by-pixel to the LED matrix canvas."""
+    pixels = img.load()
+    for y in range(64):
+        for x in range(64):
+            r, g, b = pixels[x, y]
+            canvas.SetPixel(x, y, r, g, b)
 
 
 def fmt_duration(secs):
@@ -203,7 +292,7 @@ class Scroller:
         return self.offset
 
 
-# ── Render ────────────────────────────────────────────────────────────────────
+# ── Render: Basic screen ──────────────────────────────────────────────────────
 # Layout (64×64):
 #   y= 0- 9  |  "TO: [scrolling destination name]"   5x8
 #   y=10     |  ── divider ──
@@ -213,7 +302,7 @@ class Scroller:
 #   y=42-43  |  ── divider ──
 #   y=44-63  |  Drive time (9x18B, large, centered — ~20px tall)
 
-def draw_frame(canvas, fonts, data, scrollers, now):
+def draw_basic(canvas, fonts, data, scrollers, now):
     clear_canvas(canvas)
 
     f_large = fonts["large"]   # 10x20 for temperature
@@ -266,7 +355,7 @@ def draw_frame(canvas, fonts, data, scrollers, now):
         tw = text_w(canvas, f_large, temp_str)
         tx = max(0, (64 - tw) // 2)
         graphics.DrawText(canvas, f_large, tx, 30, c_temp, temp_str)
-        # small °F/°C to the right of the number, vertically centred in temp area
+        # small °F/°C to the right of the number
         deg_x = min(tx + tw + 1, 57)
         graphics.DrawText(canvas, f_small, deg_x, 20, c_label, f"\xb0{unit_sym}")
     else:
@@ -286,13 +375,22 @@ def draw_frame(canvas, fonts, data, scrollers, now):
     # ── Rows 43-63: Drive time (large) ───────────────────────────────────
     draw_line(canvas, 42)
     dur_str = fmt_duration(dur)
-    dw = text_w(canvas, f_drive, dur_str)
-    # If even the big font overflows (e.g. "10h 59m"), fall back to f_small
-    if dw > 62:
+    dw2 = text_w(canvas, f_drive, dur_str)
+    if dw2 > 62:
         draw_centered(canvas, f_small, 56, c_drive, dur_str)
     else:
-        dx = max(0, (64 - dw) // 2)
+        dx = max(0, (64 - dw2) // 2)
         graphics.DrawText(canvas, f_drive, dx, 63, c_drive, dur_str)
+
+
+# ── Render: Map View screen ───────────────────────────────────────────────────
+def draw_map_view(canvas, data):
+    """Blit the cached Mapbox map image. Clears canvas if image not ready."""
+    map_img = data.get("map_img")
+    if map_img is not None:
+        blit_image(canvas, map_img)
+    else:
+        clear_canvas(canvas)
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -304,6 +402,10 @@ def main():
         sys.exit(1)
 
     print(f"[map] from={MAP_ADDRESS_A!r}  to={MAP_ADDRESS_B!r}", flush=True)
+    if MAPBOX_TOKEN:
+        print("[map] Map View enabled (Mapbox token present)", flush=True)
+    else:
+        print("[map] Map View disabled (no MAPBOX_TOKEN)", flush=True)
 
     opts = RGBMatrixOptions()
     opts.rows             = 64
@@ -327,14 +429,16 @@ def main():
     }
     scrollers = {"dest": Scroller()}
 
-    data       = {"loading": True, "dest_name": MAP_ADDRESS_B}
-    last_fetch = 0.0
-    last_hb    = 0.0
+    data            = {"loading": True, "dest_name": MAP_ADDRESS_B}
+    last_fetch      = 0.0
+    last_hb         = 0.0
+    submode         = 0    # 0 = Basic, 1 = Map View
+    last_switch     = 0.0
 
     while True:
         now = time.time()
 
-        # Heartbeat
+        # ── Heartbeat ─────────────────────────────────────────────────────
         if now - last_hb >= HEARTBEAT_INTERVAL:
             try:
                 with open(HEARTBEAT_FILE, "w") as fh:
@@ -343,7 +447,7 @@ def main():
                 pass
             last_hb = now
 
-        # Fetch / refresh data
+        # ── Fetch / refresh data ──────────────────────────────────────────
         if now - last_fetch >= UPDATE_INTERVAL:
             last_fetch = now
             try:
@@ -352,22 +456,36 @@ def main():
                 if geo_a and geo_b:
                     la, lna, _      = geo_a
                     lb, lnb, name_b = geo_b
-                    dur = get_drive_time(la, lna, lb, lnb)
-                    wx  = get_weather(lb, lnb, WEATHER_UNITS)
+
+                    dur, route_coords = get_route(la, lna, lb, lnb)
+                    wx                = get_weather(lb, lnb, WEATHER_UNITS)
+
+                    # Fetch map image if Mapbox is configured
+                    map_img = None
+                    if MAPBOX_TOKEN and HAS_PIL and route_coords:
+                        map_img = fetch_map_image(route_coords)
+
                     data = {
-                        "dest_name": name_b,
-                        "duration":  dur,
-                        "weather":   wx,
-                        "units":     WEATHER_UNITS,
-                        "loading":   False,
-                        "error":     "" if wx else "weather err",
+                        "dest_name":    name_b,
+                        "duration":     dur,
+                        "weather":      wx,
+                        "units":        WEATHER_UNITS,
+                        "loading":      False,
+                        "error":        "" if wx else "weather err",
+                        "map_img":      map_img,
+                        "route_coords": route_coords,
                     }
-                    print(f"[map] {name_b} | drive={fmt_duration(dur)} | wx={wx}", flush=True)
+                    print(
+                        f"[map] {name_b} | drive={fmt_duration(dur)} | wx={wx} "
+                        f"| map_img={'yes' if map_img else 'no'}",
+                        flush=True,
+                    )
                 else:
                     data = {
                         "dest_name": MAP_ADDRESS_B,
-                        "loading": False,
-                        "error": "geocode failed",
+                        "loading":   False,
+                        "error":     "geocode failed",
+                        "map_img":   None,
                     }
                     print("[map] geocode failed", flush=True)
             except Exception as e:
@@ -375,7 +493,24 @@ def main():
                 data["loading"] = False
                 data.setdefault("error", str(e))
 
-        draw_frame(offscreen, fonts, data, scrollers, now)
+        # ── Submode cycling ───────────────────────────────────────────────
+        # Only cycle to Map View if we actually have an image to show.
+        map_view_available = MAPBOX_TOKEN and HAS_PIL and data.get("map_img") is not None
+        if map_view_available:
+            if now - last_switch >= SUBMODE_INTERVAL:
+                submode     = 1 - submode
+                last_switch = now
+        else:
+            if submode != 0:
+                submode     = 0
+                last_switch = now
+
+        # ── Render ────────────────────────────────────────────────────────
+        if submode == 1:
+            draw_map_view(offscreen, data)
+        else:
+            draw_basic(offscreen, fonts, data, scrollers, now)
+
         offscreen = matrix.SwapOnVSync(offscreen)
         time.sleep(0.05)  # ~20fps for smooth scrolling
 

@@ -297,6 +297,7 @@ class Runner:
         try:
             print("[agent] starting Map ...", flush=True)
             weather_api_key = os.getenv("WEATHER_API_KEY", "")
+            mapbox_token    = os.getenv("MAPBOX_TOKEN", "")
             explicit_env = [
                 f"HOME={HOME_DIR}",
                 f"XDG_CACHE_HOME={HOME_DIR}/.cache",
@@ -309,6 +310,8 @@ class Runner:
             ]
             if weather_api_key:
                 explicit_env.append(f"WEATHER_API_KEY={weather_api_key}")
+            if mapbox_token:
+                explicit_env.append(f"MAPBOX_TOKEN={mapbox_token}")
             cmd = [
                 "sudo", "-n", "/usr/bin/env",
                 *explicit_env,
