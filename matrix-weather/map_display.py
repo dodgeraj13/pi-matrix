@@ -46,6 +46,8 @@ WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
 WEATHER_UNITS   = os.getenv("WEATHER_UNITS", "imperial")
 MAP_ADDRESS_A   = os.getenv("MAP_ADDRESS_A", "").strip()
 MAP_ADDRESS_B   = os.getenv("MAP_ADDRESS_B", "").strip()
+MAP_LABEL_A     = os.getenv("MAP_LABEL_A",   "").strip()   # e.g. "Home"
+MAP_LABEL_B     = os.getenv("MAP_LABEL_B",   "").strip()   # e.g. "Work"
 
 HEARTBEAT_FILE     = "/tmp/matrix-heartbeat-9"
 HEARTBEAT_INTERVAL = 30   # seconds
@@ -235,12 +237,15 @@ def draw_frame(canvas, fonts, data, scrollers, now):
     c_drive = graphics.Color( 80, 220, 120)
     c_err   = graphics.Color(255,  70,  70)
 
-    # ── Row 1-8: "TO: [destination]" ─────────────────────────────────────
-    graphics.DrawText(canvas, f_small, 1, 8, c_label, "TO:")
-    dest_avail = 64 - 18
+    # ── Row 1-8: "[label]: [destination scrolling]" ──────────────────────
+    prefix     = (MAP_LABEL_B + ":") if MAP_LABEL_B else "TO:"
+    prefix_w   = text_w(canvas, f_small, prefix)
+    graphics.DrawText(canvas, f_small, 1, 8, c_label, prefix)
+    dest_start = 1 + prefix_w + 3          # 3px gap after prefix
+    dest_avail = 64 - dest_start
     dw = text_w(canvas, f_small, dest)
     sx = scrollers["dest"].tick(dw, dest_avail, now)
-    graphics.DrawText(canvas, f_small, 17 - sx, 8, c_dest, dest)
+    graphics.DrawText(canvas, f_small, dest_start - sx, 8, c_dest, dest)
 
     draw_line(canvas, 10)
 
@@ -261,9 +266,9 @@ def draw_frame(canvas, fonts, data, scrollers, now):
         tw = text_w(canvas, f_large, temp_str)
         tx = max(0, (64 - tw) // 2)
         graphics.DrawText(canvas, f_large, tx, 30, c_temp, temp_str)
-        # small °F/°C superscript top-right of the number
+        # small °F/°C to the right of the number, vertically centred in temp area
         deg_x = min(tx + tw + 1, 57)
-        graphics.DrawText(canvas, f_small, deg_x, 14, c_label, f"\xb0{unit_sym}")
+        graphics.DrawText(canvas, f_small, deg_x, 20, c_label, f"\xb0{unit_sym}")
     else:
         draw_centered(canvas, f_small, 24, c_label, "--")
 
