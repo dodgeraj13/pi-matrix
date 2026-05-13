@@ -195,61 +195,32 @@ def bbox_center_zoom(coords, tile_px=64):
 
 
 def dark_traffic_filter(img):
-    """Post-process a Mapbox traffic-night-v2 tile into true dark mode.
+    """Post-process the Mapbox tile into true dark mode.
 
-    Pass 1 — HSV colour gate:
-      Keeps traffic-coloured roads (red/amber/green) and water (blue).
-      Everything else → black (removes background, non-traffic roads).
-
-    Pass 2 — morphological erosion (×2):
-      Any coloured pixel that doesn't have ≥3 coloured neighbours is
-      zeroed out.  City-name labels are thin isolated clusters (survive
-      the colour gate but fail the connectivity test); road lines are
-      wide continuous stripes and survive.
-
-    Uses numpy for vectorised speed.
+    Keeps traffic-coloured roads (red / amber / green) and water (blue).
+    Everything else → black.  Pure Python + colorsys; no numpy required.
     """
     try:
-        import numpy as np
-        arr  = np.array(img, dtype=np.float32) / 255.0   # (H, W, 3) 0-1 RGB
-        r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
-
-        cmax  = np.maximum(np.maximum(r, g), b)
-        cmin  = np.minimum(np.minimum(r, g), b)  # noqa: F841
-        delta = cmax - cmin
-
-        sat = np.where(cmax > 1e-6, delta / cmax, 0.0)
-
-        eps = 1e-6
-        hue = np.zeros_like(r)
-        mr = (cmax == r) & (delta > eps)
-        mg = (cmax == g) & (delta > eps)
-        mb = (cmax == b) & (delta > eps)
-        hue[mr] = (((g[mr] - b[mr]) / (delta[mr] + eps)) % 6) / 6
-        hue[mg] = ((b[mg] - r[mg]) / (delta[mg] + eps) + 2) / 6
-        hue[mb] = ((r[mb] - g[mb]) / (delta[mb] + eps) + 4) / 6
-
-        is_red   = ((hue < 0.06) | (hue > 0.93)) & (sat > 0.30) & (cmax > 0.18)
-        is_amber = (hue > 0.07) & (hue < 0.21)   & (sat > 0.40) & (cmax > 0.18)
-        is_green = (hue > 0.24) & (hue < 0.46)   & (sat > 0.22) & (cmax > 0.18)
-        is_water = (hue > 0.50) & (hue < 0.72)   & (sat > 0.12) & (cmax > 0.08)
-
-        keep = is_red | is_amber | is_green | is_water
-
-        # Morphological erosion — 2 passes, need ≥3 neighbours to survive
-        for _ in range(2):
-            kf  = keep.astype(np.float32)
-            pad = np.pad(kf, 1, mode='constant', constant_values=0)
-            nbr = (pad[:-2,:-2] + pad[:-2,1:-1] + pad[:-2,2:] +
-                   pad[1:-1,:-2]                 + pad[1:-1,2:] +
-                   pad[2:,:-2]  + pad[2:,1:-1]  + pad[2:,2:])
-            keep = keep & (nbr >= 3)
-
-        result          = np.zeros_like(arr)
-        result[keep]    = arr[keep]
-        result[is_water & keep] = np.clip(arr[is_water & keep] * 1.6, 0, 1)
-
-        return Image.fromarray((result * 255).astype(np.uint8))
+        import colorsys
+        src = img.load()
+        w, h = img.size
+        out = Image.new("RGB", (w, h), (0, 0, 0))
+        dst = out.load()
+        for y in range(h):
+            for x in range(w):
+                r, g, b  = src[x, y]
+                hue, sat, val = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+                is_red   = (hue < 0.06 or hue > 0.93) and sat > 0.30 and val > 0.18
+                is_amber = 0.07 < hue < 0.21           and sat > 0.40 and val > 0.18
+                is_green = 0.24 < hue < 0.46           and sat > 0.22 and val > 0.18
+                is_water = 0.50 < hue < 0.72           and sat > 0.12 and val > 0.08
+                if is_red or is_amber or is_green:
+                    dst[x, y] = (r, g, b)
+                elif is_water:
+                    dst[x, y] = (min(255, int(r * 1.6)),
+                                 min(255, int(g * 1.6)),
+                                 min(255, int(b * 1.6)))
+        return out
     except Exception as e:
         print(f"[map] dark filter error: {e}", flush=True)
         return img
@@ -257,10 +228,15 @@ def dark_traffic_filter(img):
 
 # ── PIL route drawing helpers ─────────────────────────────────────────────────
 
-def _lonlat_to_px(lon, lat, clon, clat, zoom, tile_px):
-    """Mercator lon/lat → pixel (x, y) within a tile_px-square Mapbox tile."""
+def _lonlat_to_px(lon, lat, clon, clat, zoom, tile_px, retina=2):
+    """Mercator lon/lat → pixel (x, y) within a tile_px-square Mapbox tile.
+
+    retina=2 because we fetch @2x: the 128×128 physical image covers the same
+    geographic area as a 64×64 logical image, so each degree of displacement
+    equals twice as many physical pixels compared to a plain 512-px world map.
+    """
     import math
-    scale = 512 * (2 ** zoom)                        # Mapbox 512-px base tiles
+    scale = 512 * (2 ** zoom) * retina   # physical pixels per 360° at this zoom
     px = (lon - clon) * scale / 360 + tile_px / 2
     def _merc(d): return math.log(math.tan(math.pi / 4 + math.radians(d) / 2))
     py = -(_merc(lat) - _merc(clat)) * scale / (2 * math.pi) + tile_px / 2
@@ -277,15 +253,14 @@ def _draw_route(img, coords, clon, clat, zoom):
     This lets the custom Mapbox style drive the traffic colour scale while
     the PIL line makes the specific route clearly visible at 3 px width.
     """
-    import numpy as np
     from PIL import ImageDraw
 
     draw   = ImageDraw.Draw(img)
     tile   = img.width                               # 128 at @2x
     pixels = [_lonlat_to_px(c[0], c[1], clon, clat, zoom, tile) for c in coords]
 
-    FREE_FLOW = (30, 120, 255)   # blue  — no congestion / no data
-    arr       = np.array(img)    # (H, W, 3) uint8 — sample traffic colours here
+    FREE_FLOW = (30, 120, 255)   # blue — no congestion / no data
+    px        = img.load()       # PIL pixel accessor — no numpy needed
 
     if len(pixels) >= 2:
         for i in range(len(pixels) - 1):
@@ -293,7 +268,7 @@ def _draw_route(img, coords, clon, clat, zoom):
             # Midpoint of this segment → sample tile colour
             mx = max(0, min(tile - 1, (p1[0] + p2[0]) // 2))
             my = max(0, min(tile - 1, (p1[1] + p2[1]) // 2))
-            r, g, b = int(arr[my, mx, 0]), int(arr[my, mx, 1]), int(arr[my, mx, 2])
+            r, g, b = px[mx, my]   # PIL uses (x, y) order
             # Use sampled colour if meaningful; otherwise default to free-flow blue
             seg_col = (r, g, b) if (r > 25 or g > 25 or b > 25) else FREE_FLOW
             draw.line([p1, p2], fill=seg_col, width=3)
