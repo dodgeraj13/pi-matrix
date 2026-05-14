@@ -505,7 +505,6 @@ def main() -> int:
 
     time.sleep(1)
     _add_port_redirect()
-    display_proc = start_wifi_display()
     server = start_http_server()
 
     print(f"[wifi] Ready — phone should show 'Sign in to network' automatically.")
@@ -520,7 +519,6 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\n[wifi] Interrupted.")
     finally:
-        stop_wifi_display(display_proc)
         try:
             server.shutdown()
         except Exception:
