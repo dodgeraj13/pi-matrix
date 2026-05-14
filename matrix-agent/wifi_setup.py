@@ -216,7 +216,7 @@ _CAPTIVE_PROBE_PATHS = {
     "/redirect",               # Windows
 }
 
-_server_state = {"success": False}
+_server_state = {"success": False, "last_error": ""}
 
 
 class ProvisionHandler(BaseHTTPRequestHandler):
@@ -249,14 +249,15 @@ class ProvisionHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path in _CAPTIVE_PROBE_PATHS:
-            # Redirect OS captive portal probes to our setup page
-            self._redirect(f"http://{HOTSPOT_IP}/")
+            self._redirect(f"http://{HOTSPOT_IP}:{HTTP_PORT}/")
         elif path == "/":
             self._html(HTML_PAGE)
         elif path == "/scan":
             self._json(scan_networks())
+        elif path == "/status":
+            self._json({"error": _server_state["last_error"]})
         else:
-            self._redirect(f"http://{HOTSPOT_IP}/")
+            self._redirect(f"http://{HOTSPOT_IP}:{HTTP_PORT}/")
 
     def do_POST(self):
         if self.path != "/connect":
@@ -273,18 +274,26 @@ class ProvisionHandler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": "No SSID provided"})
             return
 
-        print("[http] Stopping hotspot to attempt connection...")
-        stop_hotspot()
-        time.sleep(2)
+        # Respond immediately — the hotspot drops when we try to connect,
+        # which kills the client's connection before we can send a response later.
+        # The frontend handles success/failure based on whether it can read this reply.
+        self._json({"ok": "pending"})
 
-        ok, err = connect_to_network(ssid, password)
-        if ok:
-            _server_state["success"] = True
-            self._json({"ok": True})
-        else:
-            print("[http] Failed — restarting hotspot so user can retry...")
-            create_hotspot()
-            self._json({"ok": False, "error": err})
+        def _do_connect():
+            time.sleep(0.5)  # let response flush
+            print("[http] Stopping hotspot to attempt connection...")
+            stop_hotspot()
+            time.sleep(2)
+            ok, err = connect_to_network(ssid, password)
+            if ok:
+                _server_state["last_error"] = ""
+                _server_state["success"] = True
+            else:
+                print("[http] Failed — restarting hotspot so user can retry...")
+                _server_state["last_error"] = err or "Wrong password — please try again"
+                create_hotspot()
+
+        threading.Thread(target=_do_connect, daemon=True).start()
 
 
 # ──────────────────────────────────────────────
@@ -334,6 +343,13 @@ HTML_PAGE = """<!DOCTYPE html>
 const sel=document.getElementById('net'),connBtn=document.getElementById('connBtn'),st=document.getElementById('st');
 function show(msg,t){st.textContent=msg;st.className=t;st.style.display='block'}
 sel.onchange=()=>{connBtn.disabled=sel.value===''};
+// On load, check if a previous attempt failed
+window.addEventListener('load',async()=>{
+  try{
+    const s=await(await fetch('/status')).json();
+    if(s.error)show('Previous attempt failed: '+s.error+' — please try again.','err');
+  }catch(_){}
+});
 async function doScan(){
   const btn=document.getElementById('scanBtn');
   btn.disabled=true;btn.textContent='Scanning…';
@@ -361,17 +377,11 @@ async function doConnect(){
   show('Connecting to "'+ssid+'"… up to 30 seconds.','inf');
   const form=new URLSearchParams();form.append('ssid',ssid);form.append('password',pw);
   try{
-    const resp=await fetch('/connect',{method:'POST',body:form});
-    let d={ok:false,error:'unknown'};
-    try{d=await resp.json()}catch(_){}
-    if(d.ok){
-      show('Connected! Switch back to your home WiFi — your Matrix display is online.','ok');
-    }else{
-      show('Wrong password or connection failed — please try again.','err');
-      connBtn.disabled=false;
-    }
+    await fetch('/connect',{method:'POST',body:form});
+    // Got a response — hotspot still up — means we're connecting in background
+    show('Connecting… please wait up to 30 seconds. If this page disappears, you\'re connected!','inf');
   }catch(e){
-    // "Failed to fetch" means the hotspot dropped because we connected successfully
+    // "Failed to fetch" = hotspot dropped = connected successfully
     show('Connected! Switch back to your home WiFi — your Matrix display is online.','ok');
   }
 }
