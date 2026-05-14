@@ -23,6 +23,7 @@ REQUIREMENTS:
 
 import sys
 import os
+import signal
 import time
 import socket
 import subprocess
@@ -398,6 +399,39 @@ async function doConnect(){
 class _ReuseServer(HTTPServer):
     allow_reuse_address = True
 
+def start_wifi_display() -> "subprocess.Popen | None":
+    """Spawn wifi_display.py as a subprocess so it can safely use the LED hardware."""
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wifi_display.py")
+    python = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin", "python")
+    if not os.path.exists(python):
+        python = sys.executable
+    if not os.path.exists(script):
+        print("[wifi] wifi_display.py not found — skipping LED display")
+        return None
+    try:
+        proc = subprocess.Popen(
+            ["sudo", "-n", python, script],
+            start_new_session=True,
+        )
+        print(f"[wifi] LED display started (pid {proc.pid})")
+        return proc
+    except Exception as e:
+        print(f"[wifi] Could not start LED display: {e}")
+        return None
+
+def stop_wifi_display(proc: "subprocess.Popen | None") -> None:
+    if proc is None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        proc.wait(timeout=3)
+        print("[wifi] LED display stopped")
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
 def start_http_server() -> HTTPServer:
     server = _ReuseServer(("0.0.0.0", HTTP_PORT), ProvisionHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -438,10 +472,11 @@ def main() -> int:
 
     time.sleep(1)
     _add_port_redirect()
+    display_proc = start_wifi_display()
     server = start_http_server()
 
     print(f"[wifi] Ready — phone should show 'Sign in to network' automatically.")
-    print(f"[wifi] Or manually connect to '{HOTSPOT_SSID}' and open http://{HOTSPOT_IP}/")
+    print(f"[wifi] Or manually connect to '{HOTSPOT_SSID}' and open http://{HOTSPOT_IP}:{HTTP_PORT}/")
 
     try:
         while True:
@@ -452,6 +487,7 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\n[wifi] Interrupted.")
     finally:
+        stop_wifi_display(display_proc)
         try:
             server.shutdown()
         except Exception:
