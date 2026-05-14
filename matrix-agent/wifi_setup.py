@@ -15,7 +15,6 @@ REQUIREMENTS:
   - NetworkManager (nmcli) installed
   - wlan0 interface present
   - Script run as root or pi user with NOPASSWD sudo for nmcli
-  - For LED display: rpi-rgb-led-matrix installed at /home/pi_two/rpi-rgb-led-matrix
 """
 
 import sys
@@ -36,11 +35,6 @@ HOTSPOT_PASSWORD = "matrix1234"
 HOTSPOT_CON_NAME = "matrix-hotspot"
 HOTSPOT_IP       = "10.42.0.1"
 HTTP_PORT        = 80
-# Resolve the real user's home even when run via sudo
-_REAL_USER       = os.environ.get("SUDO_USER") or os.environ.get("USER") or "pi"
-_HOME            = os.path.expanduser(f"~{_REAL_USER}")
-FONT_PATH        = os.path.join(_HOME, "rpi-rgb-led-matrix", "fonts", "6x10.bdf")
-SCROLL_TEXT      = "  Connect to WiFi: Matrix-Setup  pw: matrix1234  then visit 10.42.0.1  "
 
 # ──────────────────────────────────────────────
 # Connectivity check
@@ -77,7 +71,7 @@ def wlan0_exists() -> bool:
 
 def create_hotspot() -> bool:
     """Create the Matrix-Setup WiFi hotspot. Returns True on success."""
-    print("[wifi] Creating hotspot …")
+    print("[wifi] Creating hotspot ...")
     result = _nmcli(
         "device", "wifi", "hotspot",
         "ifname", "wlan0",
@@ -99,7 +93,7 @@ def stop_hotspot() -> None:
     print("[wifi] Hotspot stopped and deleted.")
 
 
-def scan_networks() -> list[dict]:
+def scan_networks() -> list:
     """
     Rescan and return a deduplicated list of visible networks,
     sorted by signal strength (descending), excluding our own hotspot.
@@ -109,8 +103,8 @@ def scan_networks() -> list[dict]:
     time.sleep(2)
 
     result = _nmcli("-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list")
-    seen: set[str] = set()
-    networks: list[dict] = []
+    seen = set()
+    networks = []
 
     for line in result.stdout.splitlines():
         parts = line.split(":")
@@ -137,12 +131,12 @@ def scan_networks() -> list[dict]:
     return networks
 
 
-def connect_to_network(ssid: str, password: str) -> tuple[bool, str]:
+def connect_to_network(ssid: str, password: str):
     """
     Attempt to connect to a WiFi network.
     Returns (success: bool, error_message: str).
     """
-    print(f"[wifi] Attempting connection to '{ssid}' …")
+    print(f"[wifi] Attempting connection to '{ssid}' ...")
     args = ["device", "wifi", "connect", ssid]
     if password:
         args += ["password", password]
@@ -159,111 +153,6 @@ def connect_to_network(ssid: str, password: str) -> tuple[bool, str]:
         err = result.stderr.strip() or result.stdout.strip()
         print(f"[wifi] Connection failed: {err}")
         return False, err
-
-
-# ──────────────────────────────────────────────
-# LED matrix display (optional)
-# ──────────────────────────────────────────────
-
-def _make_matrix():
-    """Initialise and return an RGBMatrix, or None on failure."""
-    try:
-        from rgbmatrix import RGBMatrix, RGBMatrixOptions  # type: ignore
-        options = RGBMatrixOptions()
-        options.rows = 64
-        options.cols = 64
-        options.hardware_mapping = "adafruit-hat-pwm"
-        options.gpio_slowdown = 2
-        options.disable_hardware_pulsing = True
-        return RGBMatrix(options=options)
-    except Exception as e:
-        print(f"[led] Could not initialise matrix: {e}")
-        return None
-
-
-def _try_show_qr(matrix) -> bool:
-    """
-    Draw a WiFi QR code on the matrix. Returns True on success.
-    The QR encodes the WIFI: URI so phones auto-connect on scan.
-    """
-    try:
-        import qrcode  # type: ignore
-        wifi_uri = f"WIFI:S:{HOTSPOT_SSID};T:WPA;P:{HOTSPOT_PASSWORD};;"
-        qr = qrcode.QRCode(
-            version=None,              # auto-select smallest version
-            error_correction=qrcode.constants.ERROR_CORRECT_L,
-            box_size=2,
-            border=2,
-        )
-        qr.add_data(wifi_uri)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="white", back_color="black").convert("RGB")
-
-        # Centre the QR on the 64×64 canvas
-        off_x = max(0, (64 - img.width)  // 2)
-        off_y = max(0, (64 - img.height) // 2)
-
-        canvas = matrix.CreateFrameCanvas()
-        canvas.Clear()
-        for y in range(min(img.height, 64)):
-            for x in range(min(img.width, 64)):
-                r, g, b = img.getpixel((x, y))
-                canvas.SetPixel(off_x + x, off_y + y, r, g, b)
-        matrix.SwapOnVSync(canvas)
-        print(f"[led] QR code displayed ({img.width}×{img.height} px).")
-        return True
-    except ImportError:
-        print("[led] qrcode library not installed — falling back to scroll text.")
-        return False
-    except Exception as e:
-        print(f"[led] QR render error: {e}")
-        return False
-
-
-def _try_scroll_text(matrix, stop_event) -> bool:
-    """Scroll setup instructions across the matrix. Returns True if started."""
-    try:
-        from rgbmatrix import graphics  # type: ignore
-        if not os.path.exists(FONT_PATH):
-            print(f"[led] Font not found at {FONT_PATH}")
-            return False
-        font = graphics.Font()
-        font.LoadFont(FONT_PATH)
-        white = graphics.Color(255, 255, 255)
-        canvas = matrix.CreateFrameCanvas()
-        pos = canvas.width
-        while not stop_event.is_set():
-            canvas.Clear()
-            length = graphics.DrawText(canvas, font, pos, 48, white, SCROLL_TEXT)
-            pos -= 1
-            if pos + length < 0:
-                pos = canvas.width
-            canvas = matrix.SwapOnVSync(canvas)
-            time.sleep(0.03)
-        return True
-    except Exception as e:
-        print(f"[led] Scroll error: {e}")
-        return False
-
-
-def _led_body(stop_event: threading.Event) -> None:
-    """
-    LED display body — runs in a daemon thread.
-    Tries QR code first, falls back to scroll text.
-    """
-    matrix = _make_matrix()
-    if matrix is None:
-        print(f"[led] Matrix unavailable — skipping display.")
-        return
-    try:
-        if _try_show_qr(matrix):
-            # QR is static — hold it until stop is requested
-            while not stop_event.is_set():
-                time.sleep(0.5)
-        else:
-            _try_scroll_text(matrix, stop_event)
-    finally:
-        matrix.Clear()
 
 
 # ──────────────────────────────────────────────
@@ -412,7 +301,7 @@ HTML_PAGE = """<!DOCTYPE html>
         const resp = await fetch('/connect', { method: 'POST', body: new URLSearchParams(form) });
         const data = await resp.json();
         if (data.ok) {
-          showStatus('Connected! The device will now restart its agent. You can close this page.', 'ok');
+          showStatus('Connected! The device will now start its agent. You can close this page.', 'ok');
         } else {
           showStatus('Connection failed: ' + (data.error || 'unknown error'), 'err');
           connectBtn.disabled = false;
@@ -441,8 +330,7 @@ _server_state = {
 class ProvisionHandler(BaseHTTPRequestHandler):
     """Handles GET / (HTML), GET /scan (JSON), POST /connect (form)."""
 
-    # Silence the default request logging
-    def log_message(self, fmt, *args):  # noqa: N802
+    def log_message(self, fmt, *args):
         print(f"[http] {self.address_string()} — {fmt % args}")
 
     def _send_json(self, data: dict, status: int = 200) -> None:
@@ -461,8 +349,10 @@ class ProvisionHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self):  # noqa: N802
-        if self.path == "/":
+    def do_GET(self):
+        if self.path in ("/", "/generate_204", "/hotspot-detect.html",
+                         "/ncsi.txt", "/connecttest.txt"):
+            # Captive portal: redirect all OS probes to our page
             self._send_html(HTML_PAGE)
         elif self.path == "/scan":
             nets = scan_networks()
@@ -470,7 +360,7 @@ class ProvisionHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404, "Not found")
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):
         if self.path != "/connect":
             self.send_error(404, "Not found")
             return
@@ -486,7 +376,7 @@ class ProvisionHandler(BaseHTTPRequestHandler):
             return
 
         # Take the hotspot down so wlan0 is free to connect
-        print("[http] Stopping hotspot to attempt connection…")
+        print("[http] Stopping hotspot to attempt connection...")
         stop_hotspot()
         time.sleep(2)
 
@@ -496,7 +386,7 @@ class ProvisionHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
         else:
             # Restore hotspot so the user can try again
-            print("[http] Connection failed — restarting hotspot…")
+            print("[http] Connection failed — restarting hotspot...")
             create_hotspot()
             self._send_json({"ok": False, "error": err})
 
@@ -506,7 +396,7 @@ class ProvisionHandler(BaseHTTPRequestHandler):
 # ──────────────────────────────────────────────
 
 class _ReusableHTTPServer(HTTPServer):
-    allow_reuse_address = True  # must be set before bind() in __init__
+    allow_reuse_address = True
 
 
 def start_http_server() -> HTTPServer:
@@ -531,7 +421,7 @@ def main() -> int:
             print("[wifi] Already online — nothing to do.")
             return 0
 
-        print("[wifi] Offline — waiting 10 s before retry…")
+        print("[wifi] Offline — waiting 10 s before retry...")
         time.sleep(10)
 
         if is_online():
@@ -552,21 +442,15 @@ def main() -> int:
         print("[wifi] ERROR: Failed to create hotspot — check nmcli / sudo permissions.")
         return 1
 
-    # ── 4. Start LED display: QR code if possible, else scroll text ──────
-    led_stop = threading.Event()
-    led_thread = threading.Thread(
-        target=_led_body, args=(led_stop,), daemon=True
-    )
-    led_thread.start()
-
-    # ── 5. Give hotspot time to assign IPs, then start HTTP server ───────
+    # ── 4. Start HTTP server ─────────────────────────────────────────────
     time.sleep(1)
     server = start_http_server()
 
-    print(f"[wifi] Provisioning active. Connect to '{HOTSPOT_SSID}' "
-          f"(pw: {HOTSPOT_PASSWORD}) then open http://{HOTSPOT_IP}/")
+    print(f"[wifi] Provisioning active.")
+    print(f"[wifi] Connect phone/laptop to WiFi: '{HOTSPOT_SSID}' (password: {HOTSPOT_PASSWORD})")
+    print(f"[wifi] Then open http://{HOTSPOT_IP}/ in a browser.")
 
-    # ── 6. Poll for connectivity (main thread) ────────────────────────────
+    # ── 5. Poll for connectivity (main thread) ────────────────────────────
     try:
         while True:
             time.sleep(3)
@@ -576,14 +460,11 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\n[wifi] Interrupted — cleaning up.")
     finally:
-        # ── 7. Cleanup ───────────────────────────────────────────────────
-        led_stop.set()
+        # ── 6. Cleanup ───────────────────────────────────────────────────
         try:
             server.shutdown()
         except Exception:
             pass
-        # Always delete the hotspot profile, even if it was already stopped
-        # by a successful /connect request.
         _nmcli("con", "delete", HOTSPOT_CON_NAME)
         print("[wifi] Cleanup complete.")
 
