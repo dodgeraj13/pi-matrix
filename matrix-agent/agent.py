@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-import asyncio, json, os, signal, subprocess, sys, time
+import asyncio, datetime, json, os, signal, subprocess, sys, time
 from pathlib import Path
 
 import requests
@@ -51,6 +51,8 @@ class Runner:
         self.map_label_a   = ""     # friendly label for origin  (e.g. "Home")
         self.map_label_b   = ""     # friendly label for destination (e.g. "Work")
         self.map_submode   = "alternate"  # "basic" | "map" | "alternate"
+        self.schedule_enabled = False
+        self.schedule_slots   = []   # [{"id":..,"start":"HH:MM","end":"HH:MM","mode":int}]
         self.mlb_proc: subprocess.Popen | None = None
         self.music_proc: subprocess.Popen | None = None
         self.clock_proc: subprocess.Popen | None = None
@@ -420,6 +422,33 @@ class Runner:
         # helper: restart current mode (used by watchdog)
         self._force_restart()
 
+    def _check_schedule(self):
+        """Apply mode based on current time. Called every 30 s."""
+        if not self.schedule_enabled or not self.schedule_slots:
+            return
+        import datetime as _dt
+        ct = _dt.datetime.now().strftime("%H:%M")
+        for slot in self.schedule_slots:
+            start = slot.get("start", "")
+            end   = slot.get("end",   "")
+            mode  = int(slot.get("mode", 0))
+            if not start or not end:
+                continue
+            # Support midnight-spanning slots (start > end)
+            if start <= end:
+                in_slot = start <= ct < end
+            else:
+                in_slot = ct >= start or ct < end
+            if in_slot:
+                if self.mode != mode:
+                    print(f"[schedule] {start}–{end} → mode {mode}", flush=True)
+                    self.apply_mode(mode)
+                return
+        # No active slot — turn off if schedule is controlling display
+        if self.mode != 0:
+            print(f"[schedule] no active slot → off", flush=True)
+            self.apply_mode(0)
+
 def fetch_device_settings() -> dict:
     """Fetch per-device settings (location, units, etc.) from backend."""
     if not BACKEND_BASE or not HEADERS:
@@ -443,6 +472,19 @@ def fetch_map_config() -> dict:
             return r.json()
     except Exception as e:
         print(f"[agent] map config fetch error: {e}", flush=True)
+    return {}
+
+
+def fetch_schedule() -> dict:
+    """Fetch schedule config from backend."""
+    if not BACKEND_BASE or not HEADERS:
+        return {}
+    try:
+        r = requests.get(f"{BACKEND_BASE}/schedule", headers=HEADERS, timeout=5)
+        if r.ok:
+            return r.json()
+    except Exception as e:
+        print(f"[agent] schedule fetch error: {e}", flush=True)
     return {}
 
 
@@ -528,6 +570,15 @@ def fetch_state():
         print(f"[agent] poll error: {e}", flush=True)
     return None
 
+async def schedule_loop(runner: Runner, interval: int = 30):
+    """Check schedule every 30 s and apply mode if needed."""
+    while True:
+        try:
+            runner._check_schedule()
+        except Exception as e:
+            print(f"[agent] schedule error: {e}", flush=True)
+        await asyncio.sleep(interval)
+
 async def watchdog_loop(runner: Runner, interval=5, stall_s=90):
     # checks: process alive AND heartbeat fresh
     while True:
@@ -596,6 +647,13 @@ async def ws_loop():
     if map_cfg.get("submode") in ("basic", "map", "alternate"):
         runner.map_submode = map_cfg["submode"]
 
+    # Load schedule
+    schedule_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_schedule)
+    if schedule_cfg:
+        runner.schedule_enabled = schedule_cfg.get("enabled", False)
+        runner.schedule_slots   = schedule_cfg.get("slots", [])
+        print(f"[agent] schedule loaded: enabled={runner.schedule_enabled}, {len(runner.schedule_slots)} slots", flush=True)
+
     # initial sync
     s = fetch_state()
     if s:
@@ -606,6 +664,7 @@ async def ws_loop():
 
     # start watchdog
     asyncio.create_task(watchdog_loop(runner))
+    asyncio.create_task(schedule_loop(runner))
 
     while True:
         try:
@@ -650,6 +709,11 @@ async def ws_loop():
                             print(f"[agent] map config updated: A={addr_a!r} B={addr_b!r} submode={submode!r}", flush=True)
                             if runner.mode == 9:
                                 runner._force_restart()
+                    elif data.get("type") == "schedule":
+                        runner.schedule_enabled = bool(data.get("enabled", False))
+                        runner.schedule_slots   = data.get("slots", [])
+                        print(f"[agent] schedule updated: enabled={runner.schedule_enabled}, {len(runner.schedule_slots)} slots", flush=True)
+                        runner._check_schedule()
                     elif data.get("type") == "cmd" and data.get("cmd") == "update":
                         _do_update()
         except Exception as e:
