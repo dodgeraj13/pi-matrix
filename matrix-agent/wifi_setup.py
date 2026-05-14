@@ -36,7 +36,10 @@ HOTSPOT_PASSWORD = "matrix1234"
 HOTSPOT_CON_NAME = "matrix-hotspot"
 HOTSPOT_IP       = "10.42.0.1"
 HTTP_PORT        = 80
-FONT_PATH        = "/home/pi_two/rpi-rgb-led-matrix/fonts/6x10.bdf"
+# Resolve the real user's home even when run via sudo
+_REAL_USER       = os.environ.get("SUDO_USER") or os.environ.get("USER") or "pi"
+_HOME            = os.path.expanduser(f"~{_REAL_USER}")
+FONT_PATH        = os.path.join(_HOME, "rpi-rgb-led-matrix", "fonts", "6x10.bdf")
 SCROLL_TEXT      = "  Connect to WiFi: Matrix-Setup  pw: matrix1234  then visit 10.42.0.1  "
 
 # ──────────────────────────────────────────────
@@ -180,34 +183,40 @@ def _run_led_scroll(stop_event, RGBMatrix, RGBMatrixOptions, graphics) -> None:
     """Internal: configure matrix and scroll text in a daemon thread."""
 
     def _thread_body():
-        options = RGBMatrixOptions()
-        options.rows                = 64
-        options.cols                = 64
-        options.hardware_mapping    = "adafruit-hat-pwm"
-        options.gpio_slowdown       = 2
-        options.disable_hardware_pulsing = True
+        try:
+            options = RGBMatrixOptions()
+            options.rows                = 64
+            options.cols                = 64
+            options.hardware_mapping    = "adafruit-hat-pwm"
+            options.gpio_slowdown       = 2
+            options.disable_hardware_pulsing = True
 
-        matrix = RGBMatrix(options=options)
-        canvas = matrix.CreateFrameCanvas()
+            matrix = RGBMatrix(options=options)
+            canvas = matrix.CreateFrameCanvas()
 
-        font = graphics.Font()
-        font.LoadFont(FONT_PATH)
+            font = graphics.Font()
+            if not os.path.exists(FONT_PATH):
+                print(f"[led] Font not found at {FONT_PATH} — skipping LED display.")
+                return
+            font.LoadFont(FONT_PATH)
 
-        white = graphics.Color(255, 255, 255)
-        text  = SCROLL_TEXT
-        pos   = canvas.width  # start off-screen to the right
+            white = graphics.Color(255, 255, 255)
+            text  = SCROLL_TEXT
+            pos   = canvas.width  # start off-screen to the right
 
-        while not stop_event.is_set():
-            canvas.Clear()
-            text_len = graphics.DrawText(canvas, font, pos, 48, white, text)
-            pos -= 1
-            if pos + text_len < 0:
-                pos = canvas.width   # reset scroll
+            while not stop_event.is_set():
+                canvas.Clear()
+                text_len = graphics.DrawText(canvas, font, pos, 48, white, text)
+                pos -= 1
+                if pos + text_len < 0:
+                    pos = canvas.width   # reset scroll
 
-            canvas = matrix.SwapOnVSync(canvas)
-            time.sleep(0.03)  # ~33 fps scroll speed
+                canvas = matrix.SwapOnVSync(canvas)
+                time.sleep(0.03)  # ~33 fps scroll speed
 
-        matrix.Clear()
+            matrix.Clear()
+        except Exception as e:
+            print(f"[led] Error in LED thread: {e}")
 
     t = threading.Thread(target=_thread_body, daemon=True)
     t.start()
