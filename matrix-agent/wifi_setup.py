@@ -2,19 +2,23 @@
 WiFi Provisioning Script for Matrix Raspberry Pi
 =================================================
 
-This script checks for internet connectivity and, if offline, creates a
-WiFi hotspot so the user can provision network credentials via a web UI.
+Checks for internet connectivity. If offline, creates a WiFi hotspot with a
+captive portal so the user can provision credentials from any phone or laptop.
 
-TESTING:
-  - To test hotspot mode (even when online):
-      sudo python3 wifi_setup.py --force-setup
-  - To test when actually offline:
-      python3 wifi_setup.py
+How it works for end users:
+  1. Pi boots with no WiFi configured
+  2. This script runs — creates "Matrix-Setup" hotspot
+  3. User connects phone to "Matrix-Setup" (password: matrix1234)
+  4. Phone detects captive portal, shows "Sign in to network" popup
+  5. User picks their home WiFi, enters password, taps Connect
+  6. Pi connects to home WiFi, script exits, agent starts
+
+Testing (from a machine NOT connected over WiFi to the Pi):
+  sudo python3 wifi_setup.py --force-setup
 
 REQUIREMENTS:
-  - NetworkManager (nmcli) installed
-  - wlan0 interface present
-  - Script run as root or pi user with NOPASSWD sudo for nmcli
+  - NetworkManager (nmcli) installed and managing wlan0
+  - NOPASSWD sudo for nmcli (set up by setup.sh)
 """
 
 import sys
@@ -30,82 +34,104 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-HOTSPOT_SSID     = "Matrix-Setup"
-HOTSPOT_PASSWORD = "matrix1234"
-HOTSPOT_CON_NAME = "matrix-hotspot"
-HOTSPOT_IP       = "10.42.0.1"
-HTTP_PORT        = 80
+HOTSPOT_SSID       = "Matrix-Setup"
+HOTSPOT_PASSWORD   = "matrix1234"
+HOTSPOT_CON_NAME   = "matrix-hotspot"
+HOTSPOT_IP         = "10.42.0.1"
+HTTP_PORT          = 80
+
+# NetworkManager writes a shared dnsmasq config here when in hotspot mode.
+# Adding address=/#/<ip> makes every DNS query resolve to our IP so phones
+# automatically show the "Sign in to network" captive portal popup.
+NM_DNSMASQ_DIR     = "/etc/NetworkManager/dnsmasq-shared.d"
+NM_CAPTIVE_CONF    = os.path.join(NM_DNSMASQ_DIR, "matrix-captive.conf")
 
 # ──────────────────────────────────────────────
 # Connectivity check
 # ──────────────────────────────────────────────
 
 def is_online() -> bool:
-    """Return True if we can reach 8.8.8.8:53 (DNS)."""
     try:
-        sock = socket.create_connection(("8.8.8.8", 53), timeout=3)
-        sock.close()
+        s = socket.create_connection(("8.8.8.8", 53), timeout=3)
+        s.close()
         return True
     except OSError:
         return False
 
-
 # ──────────────────────────────────────────────
-# nmcli helpers (prefix with sudo -n for rootless use)
+# nmcli helpers
 # ──────────────────────────────────────────────
 
 def _nmcli(*args, timeout: int = 30) -> subprocess.CompletedProcess:
-    """Run nmcli with sudo -n so the script can be invoked as a normal user."""
     cmd = ["sudo", "-n", "nmcli"] + list(args)
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
+def _run(*args, timeout: int = 10) -> subprocess.CompletedProcess:
+    return subprocess.run(list(args), capture_output=True, text=True, timeout=timeout)
 
 def wlan0_exists() -> bool:
-    """Check that wlan0 is available."""
-    result = subprocess.run(
-        ["ip", "link", "show", "wlan0"],
-        capture_output=True, text=True
-    )
-    return result.returncode == 0
+    return _run("ip", "link", "show", "wlan0").returncode == 0
 
+# ──────────────────────────────────────────────
+# Captive portal DNS redirect
+# ──────────────────────────────────────────────
+
+def _write_captive_conf() -> None:
+    """
+    Tell NM's shared dnsmasq to resolve every domain to our hotspot IP.
+    This triggers the "Sign in to network" popup on Android, iOS, and Windows.
+    """
+    try:
+        os.makedirs(NM_DNSMASQ_DIR, exist_ok=True)
+        conf = f"address=/#/{HOTSPOT_IP}\n"
+        result = subprocess.run(
+            ["sudo", "-n", "tee", NM_CAPTIVE_CONF],
+            input=conf, capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            print(f"[wifi] Captive portal DNS config written → {NM_CAPTIVE_CONF}")
+        else:
+            print(f"[wifi] Warning: could not write captive conf: {result.stderr.strip()}")
+    except Exception as e:
+        print(f"[wifi] Warning: captive conf error: {e}")
+
+def _remove_captive_conf() -> None:
+    try:
+        subprocess.run(["sudo", "-n", "rm", "-f", NM_CAPTIVE_CONF],
+                       capture_output=True, text=True)
+    except Exception:
+        pass
+
+# ──────────────────────────────────────────────
+# Hotspot lifecycle
+# ──────────────────────────────────────────────
 
 def create_hotspot() -> bool:
-    """Create the Matrix-Setup WiFi hotspot. Returns True on success."""
-    print("[wifi] Creating hotspot ...")
+    print(f"[wifi] Creating hotspot '{HOTSPOT_SSID}' ...")
     result = _nmcli(
         "device", "wifi", "hotspot",
         "ifname", "wlan0",
-        "ssid",   HOTSPOT_SSID,
+        "ssid", HOTSPOT_SSID,
         "password", HOTSPOT_PASSWORD,
         "con-name", HOTSPOT_CON_NAME,
     )
     if result.returncode != 0:
-        print(f"[wifi] Failed to create hotspot: {result.stderr.strip()}")
+        print(f"[wifi] Failed: {result.stderr.strip()}")
         return False
-    print(f"[wifi] Hotspot '{HOTSPOT_SSID}' up. IP: {HOTSPOT_IP}")
+    print(f"[wifi] Hotspot up — SSID: {HOTSPOT_SSID}  password: {HOTSPOT_PASSWORD}  IP: {HOTSPOT_IP}")
     return True
 
-
 def stop_hotspot() -> None:
-    """Bring down and delete the hotspot connection profile."""
     _nmcli("con", "down", HOTSPOT_CON_NAME)
     _nmcli("con", "delete", HOTSPOT_CON_NAME)
-    print("[wifi] Hotspot stopped and deleted.")
-
+    print("[wifi] Hotspot stopped.")
 
 def scan_networks() -> list:
-    """
-    Rescan and return a deduplicated list of visible networks,
-    sorted by signal strength (descending), excluding our own hotspot.
-    """
-    # Trigger a rescan (ignore errors — device may be busy)
     _nmcli("device", "wifi", "rescan")
     time.sleep(2)
-
     result = _nmcli("-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list")
     seen = set()
     networks = []
-
     for line in result.stdout.splitlines():
         parts = line.split(":")
         if len(parts) < 3:
@@ -113,50 +139,122 @@ def scan_networks() -> list:
         ssid     = parts[0].strip()
         signal   = parts[1].strip()
         security = ":".join(parts[2:]).strip()
-
-        if not ssid or ssid == HOTSPOT_SSID:
-            continue
-        if ssid in seen:
+        if not ssid or ssid == HOTSPOT_SSID or ssid in seen:
             continue
         seen.add(ssid)
-
         try:
             sig_int = int(signal)
         except ValueError:
             sig_int = 0
-
         networks.append({"ssid": ssid, "signal": sig_int, "security": security})
-
     networks.sort(key=lambda n: n["signal"], reverse=True)
     return networks
 
-
 def connect_to_network(ssid: str, password: str):
-    """
-    Attempt to connect to a WiFi network.
-    Returns (success: bool, error_message: str).
-    """
-    print(f"[wifi] Attempting connection to '{ssid}' ...")
+    print(f"[wifi] Connecting to '{ssid}' ...")
     args = ["device", "wifi", "connect", ssid]
     if password:
         args += ["password", password]
-
     try:
         result = _nmcli(*args, timeout=30)
     except subprocess.TimeoutExpired:
-        return False, "Connection attempt timed out after 30 s"
-
+        return False, "Timed out after 30 s"
     if result.returncode == 0:
         print(f"[wifi] Connected to '{ssid}'.")
         return True, ""
-    else:
-        err = result.stderr.strip() or result.stdout.strip()
-        print(f"[wifi] Connection failed: {err}")
-        return False, err
+    err = result.stderr.strip() or result.stdout.strip()
+    print(f"[wifi] Failed: {err}")
+    return False, err
+
+# ──────────────────────────────────────────────
+# Captive-portal-aware HTTP handler
+# ──────────────────────────────────────────────
+
+# URLs that Android / iOS / Windows use to detect captive portals.
+# We serve our setup page for all of them so the OS shows the popup.
+_CAPTIVE_PROBE_PATHS = {
+    "/generate_204",           # Android
+    "/gen_204",                # Android fallback
+    "/hotspot-detect.html",    # iOS / macOS
+    "/library/test/success.html",  # iOS
+    "/ncsi.txt",               # Windows
+    "/connecttest.txt",        # Windows 10+
+    "/redirect",               # Windows
+}
+
+_server_state = {"success": False}
+
+
+class ProvisionHandler(BaseHTTPRequestHandler):
+
+    def log_message(self, fmt, *args):
+        print(f"[http] {self.address_string()} {fmt % args}")
+
+    def _json(self, data: dict, status: int = 200) -> None:
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _html(self, html: str, status: int = 200) -> None:
+        body = html.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path in _CAPTIVE_PROBE_PATHS:
+            # Redirect OS captive portal probes to our setup page
+            self._redirect(f"http://{HOTSPOT_IP}/")
+        elif path == "/":
+            self._html(HTML_PAGE)
+        elif path == "/scan":
+            self._json(scan_networks())
+        else:
+            self._redirect(f"http://{HOTSPOT_IP}/")
+
+    def do_POST(self):
+        if self.path != "/connect":
+            self.send_error(404)
+            return
+
+        length   = int(self.headers.get("Content-Length", 0))
+        raw      = self.rfile.read(length).decode()
+        params   = urllib.parse.parse_qs(raw)
+        ssid     = params.get("ssid",     [""])[0].strip()
+        password = params.get("password", [""])[0]
+
+        if not ssid:
+            self._json({"ok": False, "error": "No SSID provided"})
+            return
+
+        print("[http] Stopping hotspot to attempt connection...")
+        stop_hotspot()
+        time.sleep(2)
+
+        ok, err = connect_to_network(ssid, password)
+        if ok:
+            _server_state["success"] = True
+            self._json({"ok": True})
+        else:
+            print("[http] Failed — restarting hotspot so user can retry...")
+            create_hotspot()
+            self._json({"ok": False, "error": err})
 
 
 # ──────────────────────────────────────────────
-# HTML page (inline, no templates)
+# HTML setup page
 # ──────────────────────────────────────────────
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -166,307 +264,147 @@ HTML_PAGE = """<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Matrix WiFi Setup</title>
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: #0d0d0d;
-      color: #e0e0e0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      display: flex;
-      justify-content: center;
-      align-items: flex-start;
-      min-height: 100vh;
-      padding: 2rem 1rem;
-    }
-    .card {
-      background: #1a1a1a;
-      border: 1px solid #333;
-      border-radius: 12px;
-      padding: 2rem;
-      width: 100%;
-      max-width: 420px;
-    }
-    h1 { font-size: 1.5rem; margin-bottom: 0.4rem; color: #fff; }
-    p.sub { color: #888; font-size: 0.9rem; margin-bottom: 1.5rem; }
-    label { display: block; font-size: 0.85rem; color: #aaa; margin-bottom: 0.3rem; }
-    select, input[type="password"] {
-      width: 100%;
-      padding: 0.65rem 0.75rem;
-      background: #111;
-      border: 1px solid #444;
-      border-radius: 8px;
-      color: #e0e0e0;
-      font-size: 1rem;
-      margin-bottom: 1rem;
-    }
-    button {
-      width: 100%;
-      padding: 0.75rem;
-      border: none;
-      border-radius: 8px;
-      font-size: 1rem;
-      cursor: pointer;
-      margin-bottom: 0.75rem;
-      transition: opacity 0.2s;
-    }
-    button:disabled { opacity: 0.45; cursor: not-allowed; }
-    .btn-scan    { background: #2a2a2a; color: #ccc; border: 1px solid #555; }
-    .btn-connect { background: #4a90d9; color: #fff; }
-    #status {
-      margin-top: 1rem;
-      padding: 0.75rem;
-      border-radius: 8px;
-      font-size: 0.9rem;
-      display: none;
-    }
-    #status.ok  { background: #1a3a1a; color: #6fcf6f; border: 1px solid #3a7a3a; }
-    #status.err { background: #3a1a1a; color: #cf6f6f; border: 1px solid #7a3a3a; }
-    #status.inf { background: #1a2a3a; color: #6fafcf; border: 1px solid #3a5a7a; }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+         display:flex;justify-content:center;align-items:flex-start;min-height:100vh;padding:2rem 1rem}
+    .card{background:#1a1a1a;border:1px solid #333;border-radius:12px;padding:2rem;width:100%;max-width:420px}
+    h1{font-size:1.5rem;margin-bottom:.4rem;color:#fff}
+    p.sub{color:#888;font-size:.9rem;margin-bottom:1.5rem}
+    label{display:block;font-size:.85rem;color:#aaa;margin-bottom:.3rem}
+    select,input[type=password]{width:100%;padding:.65rem .75rem;background:#111;border:1px solid #444;
+      border-radius:8px;color:#e0e0e0;font-size:1rem;margin-bottom:1rem}
+    button{width:100%;padding:.75rem;border:none;border-radius:8px;font-size:1rem;
+           cursor:pointer;margin-bottom:.75rem;transition:opacity .2s}
+    button:disabled{opacity:.45;cursor:not-allowed}
+    .scan{background:#2a2a2a;color:#ccc;border:1px solid #555}
+    .conn{background:#4a90d9;color:#fff}
+    #st{margin-top:1rem;padding:.75rem;border-radius:8px;font-size:.9rem;display:none}
+    #st.ok{background:#1a3a1a;color:#6fcf6f;border:1px solid #3a7a3a}
+    #st.err{background:#3a1a1a;color:#cf6f6f;border:1px solid #7a3a3a}
+    #st.inf{background:#1a2a3a;color:#6fafcf;border:1px solid #3a5a7a}
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Matrix WiFi Setup</h1>
-    <p class="sub">Connect your Matrix device to your home network.</p>
-
-    <label for="network">Network</label>
-    <select id="network">
-      <option value="">— scan for networks —</option>
-    </select>
-
-    <label for="password">Password</label>
-    <input type="password" id="password" placeholder="WiFi password"/>
-
-    <button class="btn-scan" id="scanBtn" onclick="scanNetworks()">Scan for networks</button>
-    <button class="btn-connect" id="connectBtn" onclick="connectNetwork()" disabled>Connect</button>
-
-    <div id="status"></div>
-  </div>
-
-  <script>
-    const sel       = document.getElementById('network');
-    const connectBtn = document.getElementById('connectBtn');
-    const statusDiv = document.getElementById('status');
-
-    function showStatus(msg, type) {
-      statusDiv.textContent = msg;
-      statusDiv.className   = type;
-      statusDiv.style.display = 'block';
+<div class="card">
+  <h1>Matrix WiFi Setup</h1>
+  <p class="sub">Connect your Matrix display to your home network.</p>
+  <label>Network</label>
+  <select id="net"><option value="">— tap Scan to find networks —</option></select>
+  <label>Password</label>
+  <input type="password" id="pw" placeholder="WiFi password"/>
+  <button class="scan" id="scanBtn" onclick="doScan()">Scan for networks</button>
+  <button class="conn" id="connBtn" onclick="doConnect()" disabled>Connect</button>
+  <div id="st"></div>
+</div>
+<script>
+const sel=document.getElementById('net'),connBtn=document.getElementById('connBtn'),st=document.getElementById('st');
+function show(msg,t){st.textContent=msg;st.className=t;st.style.display='block'}
+sel.onchange=()=>{connBtn.disabled=sel.value===''};
+async function doScan(){
+  const btn=document.getElementById('scanBtn');
+  btn.disabled=true;btn.textContent='Scanning…';
+  show('Scanning for networks…','inf');
+  try{
+    const nets=await(await fetch('/scan')).json();
+    sel.innerHTML='<option value="">— choose a network —</option>';
+    if(!nets.length){show('No networks found. Try again.','inf')}
+    else{
+      nets.forEach(n=>{
+        const o=document.createElement('option');
+        o.value=n.ssid;
+        o.textContent=n.ssid+'  ('+n.signal+'%)'+(n.security?'  🔒':'');
+        sel.appendChild(o);
+      });
+      show('Found '+nets.length+' network(s).','inf');
     }
-
-    sel.addEventListener('change', () => {
-      connectBtn.disabled = sel.value === '';
-    });
-
-    async function scanNetworks() {
-      const btn = document.getElementById('scanBtn');
-      btn.disabled = true;
-      btn.textContent = 'Scanning…';
-      showStatus('Scanning for networks, please wait…', 'inf');
-      try {
-        const resp = await fetch('/scan');
-        const nets = await resp.json();
-        sel.innerHTML = '<option value="">— choose a network —</option>';
-        if (nets.length === 0) {
-          showStatus('No networks found. Try scanning again.', 'inf');
-        } else {
-          nets.forEach(n => {
-            const opt = document.createElement('option');
-            opt.value       = n.ssid;
-            opt.textContent = n.ssid + '  (' + n.signal + '%)' + (n.security ? '  🔒' : '');
-            sel.appendChild(opt);
-          });
-          showStatus('Found ' + nets.length + ' network(s). Select one above.', 'inf');
-        }
-      } catch(e) {
-        showStatus('Scan failed: ' + e.message, 'err');
-      } finally {
-        btn.disabled    = false;
-        btn.textContent = 'Scan for networks';
-      }
-    }
-
-    async function connectNetwork() {
-      const ssid = sel.value;
-      const pw   = document.getElementById('password').value;
-      if (!ssid) { showStatus('Please select a network first.', 'err'); return; }
-
-      connectBtn.disabled = true;
-      showStatus('Connecting to "' + ssid + '"… this may take up to 30 seconds.', 'inf');
-
-      const form = new FormData();
-      form.append('ssid',     ssid);
-      form.append('password', pw);
-
-      try {
-        const resp = await fetch('/connect', { method: 'POST', body: new URLSearchParams(form) });
-        const data = await resp.json();
-        if (data.ok) {
-          showStatus('Connected! The device will now start its agent. You can close this page.', 'ok');
-        } else {
-          showStatus('Connection failed: ' + (data.error || 'unknown error'), 'err');
-          connectBtn.disabled = false;
-        }
-      } catch(e) {
-        showStatus('Error: ' + e.message, 'err');
-        connectBtn.disabled = false;
-      }
-    }
-  </script>
+  }catch(e){show('Scan failed: '+e.message,'err')}
+  finally{btn.disabled=false;btn.textContent='Scan for networks'}
+}
+async function doConnect(){
+  const ssid=sel.value,pw=document.getElementById('pw').value;
+  if(!ssid){show('Please select a network.','err');return}
+  connBtn.disabled=true;
+  show('Connecting to "'+ssid+'"… up to 30 seconds.','inf');
+  const form=new URLSearchParams();form.append('ssid',ssid);form.append('password',pw);
+  try{
+    const d=await(await fetch('/connect',{method:'POST',body:form})).json();
+    if(d.ok){show('Connected! Your Matrix display is online. You can close this page.','ok')}
+    else{show('Failed: '+(d.error||'unknown error'),'err');connBtn.disabled=false}
+  }catch(e){show('Error: '+e.message,'err');connBtn.disabled=false}
+}
+</script>
 </body>
 </html>
 """
 
 
 # ──────────────────────────────────────────────
-# HTTP request handler
+# HTTP server
 # ──────────────────────────────────────────────
 
-# Shared mutable state between HTTP handler and main thread
-_server_state = {
-    "success": False,
-}
-
-
-class ProvisionHandler(BaseHTTPRequestHandler):
-    """Handles GET / (HTML), GET /scan (JSON), POST /connect (form)."""
-
-    def log_message(self, fmt, *args):
-        print(f"[http] {self.address_string()} — {fmt % args}")
-
-    def _send_json(self, data: dict, status: int = 200) -> None:
-        body = json.dumps(data).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _send_html(self, html: str) -> None:
-        body = html.encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):
-        if self.path in ("/", "/generate_204", "/hotspot-detect.html",
-                         "/ncsi.txt", "/connecttest.txt"):
-            # Captive portal: redirect all OS probes to our page
-            self._send_html(HTML_PAGE)
-        elif self.path == "/scan":
-            nets = scan_networks()
-            self._send_json(nets)
-        else:
-            self.send_error(404, "Not found")
-
-    def do_POST(self):
-        if self.path != "/connect":
-            self.send_error(404, "Not found")
-            return
-
-        length  = int(self.headers.get("Content-Length", 0))
-        raw     = self.rfile.read(length).decode()
-        params  = urllib.parse.parse_qs(raw)
-        ssid    = params.get("ssid", [""])[0].strip()
-        password = params.get("password", [""])[0]
-
-        if not ssid:
-            self._send_json({"ok": False, "error": "No SSID provided"})
-            return
-
-        # Take the hotspot down so wlan0 is free to connect
-        print("[http] Stopping hotspot to attempt connection...")
-        stop_hotspot()
-        time.sleep(2)
-
-        ok, err = connect_to_network(ssid, password)
-        if ok:
-            _server_state["success"] = True
-            self._send_json({"ok": True})
-        else:
-            # Restore hotspot so the user can try again
-            print("[http] Connection failed — restarting hotspot...")
-            create_hotspot()
-            self._send_json({"ok": False, "error": err})
-
-
-# ──────────────────────────────────────────────
-# HTTP server lifecycle
-# ──────────────────────────────────────────────
-
-class _ReusableHTTPServer(HTTPServer):
+class _ReuseServer(HTTPServer):
     allow_reuse_address = True
 
-
 def start_http_server() -> HTTPServer:
-    """Start the provisioning HTTP server in a daemon thread."""
-    server = _ReusableHTTPServer(("0.0.0.0", HTTP_PORT), ProvisionHandler)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    print(f"[http] Server listening on port {HTTP_PORT}")
+    server = _ReuseServer(("0.0.0.0", HTTP_PORT), ProvisionHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(f"[http] Listening on port {HTTP_PORT}")
     return server
 
 
 # ──────────────────────────────────────────────
-# Main entry point
+# Main
 # ──────────────────────────────────────────────
 
 def main() -> int:
-    force_setup = "--force-setup" in sys.argv
+    force = "--force-setup" in sys.argv
 
-    # ── 1. Quick connectivity check ──────────────────────────────────────
-    if not force_setup:
+    if not force:
         if is_online():
-            print("[wifi] Already online — nothing to do.")
+            print("[wifi] Online — nothing to do.")
             return 0
-
-        print("[wifi] Offline — waiting 10 s before retry...")
+        print("[wifi] Offline — retrying in 10 s...")
         time.sleep(10)
-
         if is_online():
-            print("[wifi] Online after retry — nothing to do.")
+            print("[wifi] Online after retry.")
             return 0
-
-        print("[wifi] Still offline — starting provisioning mode.")
+        print("[wifi] Still offline — starting provisioning.")
     else:
-        print("[wifi] --force-setup flag detected — entering hotspot mode directly.")
+        print("[wifi] --force-setup: entering hotspot mode.")
 
-    # ── 2. Sanity-check wlan0 ────────────────────────────────────────────
     if not wlan0_exists():
-        print("[wifi] ERROR: wlan0 interface not found. Cannot create hotspot.")
+        print("[wifi] ERROR: wlan0 not found.")
         return 1
 
-    # ── 3. Create hotspot ────────────────────────────────────────────────
+    # Write captive portal DNS config BEFORE creating hotspot so NM picks it up
+    _write_captive_conf()
+
     if not create_hotspot():
-        print("[wifi] ERROR: Failed to create hotspot — check nmcli / sudo permissions.")
+        _remove_captive_conf()
         return 1
 
-    # ── 4. Start HTTP server ─────────────────────────────────────────────
     time.sleep(1)
     server = start_http_server()
 
-    print(f"[wifi] Provisioning active.")
-    print(f"[wifi] Connect phone/laptop to WiFi: '{HOTSPOT_SSID}' (password: {HOTSPOT_PASSWORD})")
-    print(f"[wifi] Then open http://{HOTSPOT_IP}/ in a browser.")
+    print(f"[wifi] Ready — phone should show 'Sign in to network' automatically.")
+    print(f"[wifi] Or manually connect to '{HOTSPOT_SSID}' and open http://{HOTSPOT_IP}/")
 
-    # ── 5. Poll for connectivity (main thread) ────────────────────────────
     try:
         while True:
             time.sleep(3)
             if _server_state["success"] or is_online():
-                print("[wifi] Internet connection detected — shutting down provisioning.")
+                print("[wifi] Online — shutting down provisioning.")
                 break
     except KeyboardInterrupt:
-        print("\n[wifi] Interrupted — cleaning up.")
+        print("\n[wifi] Interrupted.")
     finally:
-        # ── 6. Cleanup ───────────────────────────────────────────────────
         try:
             server.shutdown()
         except Exception:
             pass
         _nmcli("con", "delete", HOTSPOT_CON_NAME)
-        print("[wifi] Cleanup complete.")
+        _remove_captive_conf()
+        print("[wifi] Done.")
 
     return 0
 
