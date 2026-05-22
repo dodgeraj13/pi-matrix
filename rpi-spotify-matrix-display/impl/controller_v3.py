@@ -158,6 +158,18 @@ def _fetch_idle_fallback(backend_base: str, device_token: str) -> str:
         return ""
 
 
+def _fetch_brightness_config(backend_base: str, device_token: str) -> dict:
+    """Fetch idle_brightness and dim schedule from backend."""
+    try:
+        import urllib.request, json
+        url = f"{backend_base}/brightness-config"
+        req = urllib.request.Request(url, headers={"X-Device-Token": device_token})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return {}
+
+
 def _fetch_screensaver_config(backend_base: str, device_token: str) -> dict:
     """Fetch screensaver animations/timing from backend."""
     try:
@@ -234,11 +246,15 @@ def main():
     last_active_time = math.floor(time.time())
     last_frame = None  # cache of last successfully generated frame
 
-    # Read backend + device token for idle-fallback queries
+    # Read backend + device token for config queries
     backend_base = config.get('Spotify', 'backend_url', fallback='').rstrip('/')
     device_token = config.get('Spotify', 'device_token', fallback='')
 
-    # Idle fallback + screensaver config — refresh every 60 s
+    # Effective brightness: the value set at matrix init (from config.ini)
+    normal_brightness = options.brightness
+    idle_brightness   = 20   # will be updated from /brightness-config
+
+    # Idle fallback + screensaver + brightness config — refresh every 60 s
     idle_fallback = ""
     ss_config: dict = {}
     last_fallback_check = 0.0
@@ -247,6 +263,9 @@ def main():
     # Screensaver instance (created lazily / recreated when config changes)
     screensaver: _PilScreensaver | None = None
     last_ss_config_key: str = ""  # track config to detect changes
+
+    # Track is_playing state for brightness transitions
+    prev_is_playing: bool | None = None
 
     # main loop
     while True:
@@ -260,11 +279,22 @@ def main():
                 if is_playing:
                     last_active_time = current_time
 
-            # Refresh idle-fallback + screensaver config periodically
+            # Refresh idle-fallback + screensaver + brightness config periodically
             if backend_base and device_token and (current_time - last_fallback_check) > FALLBACK_REFRESH:
                 idle_fallback = _fetch_idle_fallback(backend_base, device_token)
                 ss_config     = _fetch_screensaver_config(backend_base, device_token)
+                bc            = _fetch_brightness_config(backend_base, device_token)
+                if bc:
+                    idle_brightness = int(bc.get("idle_brightness", idle_brightness))
                 last_fallback_check = current_time
+
+            # Adjust matrix brightness on playing↔paused transitions
+            if prev_is_playing is not None and prev_is_playing != is_playing:
+                try:
+                    matrix.brightness = normal_brightness if is_playing else idle_brightness
+                except Exception:
+                    pass
+            prev_is_playing = is_playing
 
             # Decide what to show
             if is_playing:

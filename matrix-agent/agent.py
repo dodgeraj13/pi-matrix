@@ -45,7 +45,12 @@ def _now() -> float:
 class Runner:
     def __init__(self):
         self.mode = 0
-        self.brightness = 60
+        self.normal_brightness = 60   # user's setting (from /state)
+        self.brightness = 60          # effective brightness applied to hardware
+        self.idle_brightness = 20     # brightness when music is paused / dim schedule active
+        self.dim_schedule_enabled = False
+        self.dim_start = ""           # "HH:MM" when dim schedule begins
+        self.dim_end   = ""           # "HH:MM" when dim schedule ends
         self.rotation = 0  # 0,90,180,270
         self.location = ""          # e.g. "Chicago, IL" — set from /settings
         self.units = "imperial"     # "imperial" | "metric"
@@ -106,6 +111,17 @@ class Runner:
             except Exception:
                 pass
         return None
+
+    def get_effective_brightness(self) -> int:
+        """Return idle_brightness when dim schedule is active, else normal_brightness."""
+        if self.dim_schedule_enabled and self.dim_start and self.dim_end:
+            import datetime as _dt
+            ct = _dt.datetime.now().strftime("%H:%M")
+            s, e = self.dim_start, self.dim_end
+            in_dim = (s <= ct < e) if s <= e else (ct >= s or ct < e)
+            if in_dim:
+                return self.idle_brightness
+        return self.normal_brightness
 
     def _pixel_mapper(self):
         if self.rotation in (90, 180, 270):
@@ -464,12 +480,17 @@ class Runner:
         self.mode = m
 
     def apply_brightness(self, b: int):
-        b = max(0, min(100, int(b)))
-        if b == self.brightness:
+        """Store user's normal brightness and apply the effective brightness to hardware."""
+        self.normal_brightness = max(0, min(100, int(b)))
+        self._apply_effective_brightness()
+
+    def _apply_effective_brightness(self):
+        """Compute and apply effective brightness; restart running procs only if it changed."""
+        eff = self.get_effective_brightness()
+        if eff == self.brightness:
             return
-        print(f"[agent] brightness {self.brightness} -> {b}", flush=True)
-        self.brightness = b
-        # restart whichever is running to apply new brightness
+        print(f"[agent] effective brightness {self.brightness} -> {eff}", flush=True)
+        self.brightness = eff
         if self._is_running(self.mlb_proc):
             self.mlb_proc = self._stop("mlb", self.mlb_proc); self._start_mlb()
         if self._is_running(self.music_proc):
@@ -590,6 +611,19 @@ def fetch_timer_config() -> dict:
             return r.json()
     except Exception as e:
         print(f"[agent] timer config fetch error: {e}", flush=True)
+    return {}
+
+
+def fetch_brightness_config() -> dict:
+    """Fetch idle_brightness + dim schedule from backend."""
+    if not BACKEND_BASE or not HEADERS:
+        return {}
+    try:
+        r = requests.get(f"{BACKEND_BASE}/brightness-config", headers=HEADERS, timeout=5)
+        if r.ok:
+            return r.json()
+    except Exception as e:
+        print(f"[agent] brightness config fetch error: {e}", flush=True)
     return {}
 
 
@@ -714,6 +748,16 @@ def fetch_state():
         print(f"[agent] poll error: {e}", flush=True)
     return None
 
+async def brightness_schedule_loop(runner: Runner, interval: int = 60):
+    """Re-evaluate effective brightness every minute to handle dim schedule transitions."""
+    while True:
+        try:
+            runner._apply_effective_brightness()
+        except Exception as e:
+            print(f"[agent] brightness schedule error: {e}", flush=True)
+        await asyncio.sleep(interval)
+
+
 async def schedule_loop(runner: Runner, interval: int = 30):
     """Check schedule every 30 s and apply mode if needed."""
     while True:
@@ -801,6 +845,16 @@ async def ws_loop():
         runner.timer_duration = float(timer_cfg.get("duration", 0))
         print(f"[agent] timer config loaded: end_time={runner.timer_end_time}, duration={runner.timer_duration}", flush=True)
 
+    # Load brightness config (idle brightness + dim schedule) — before applying state
+    bc_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_brightness_config)
+    if bc_cfg:
+        runner.idle_brightness        = int(bc_cfg.get("idle_brightness", 20))
+        runner.dim_schedule_enabled   = bool(bc_cfg.get("dim_schedule_enabled", False))
+        runner.dim_start              = bc_cfg.get("dim_start", "")
+        runner.dim_end                = bc_cfg.get("dim_end", "")
+        print(f"[agent] brightness config: idle={runner.idle_brightness} "
+              f"dim_enabled={runner.dim_schedule_enabled} {runner.dim_start}→{runner.dim_end}", flush=True)
+
     # Load screensaver config
     ss_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_screensaver_config)
     if ss_cfg:
@@ -834,9 +888,10 @@ async def ws_loop():
         runner.apply_brightness(b)
         runner.apply_rotation(rot)
 
-    # start watchdog
+    # start watchdog, mode schedule, and brightness schedule
     asyncio.create_task(watchdog_loop(runner))
     asyncio.create_task(schedule_loop(runner))
+    asyncio.create_task(brightness_schedule_loop(runner))
 
     while True:
         try:
@@ -901,6 +956,14 @@ async def ws_loop():
                         # Backend signals that the timer just expired — switch to mode 10
                         print("[agent] timer_expired: switching to mode 10", flush=True)
                         runner.apply_mode(10)
+                    elif data.get("type") == "brightness_config":
+                        runner.idle_brightness      = int(data.get("idle_brightness", 20))
+                        runner.dim_schedule_enabled = bool(data.get("dim_schedule_enabled", False))
+                        runner.dim_start            = data.get("dim_start", "")
+                        runner.dim_end              = data.get("dim_end", "")
+                        print(f"[agent] brightness_config: idle={runner.idle_brightness} "
+                              f"dim={runner.dim_schedule_enabled} {runner.dim_start}→{runner.dim_end}", flush=True)
+                        runner._apply_effective_brightness()
                     elif data.get("type") == "screensaver_config":
                         anims     = data.get("animations", "rain,fire,plasma")
                         cycle_t   = float(data.get("cycle_time", 25.0))
