@@ -77,7 +77,7 @@ class _PlasmaAnim:
             sx = self._sx[x]+st
             for y in range(64):
                 v=sx+self._sy[y]+ct+self._sxy[x*64+y]+st2+self._rad[x*64+y]
-                h=((v*30)+t*40)%360; r,g,b=_hsv_to_rgb(h,1.0,0.85)
+                h=(((v*30)+t*40)%360)/360.0; r,g,b=_hsv_to_rgb(h,1.0,0.85)
                 px[x,y]=(int(r*255),int(g*255),int(b*255))
         self.t+=0.045
         return img
