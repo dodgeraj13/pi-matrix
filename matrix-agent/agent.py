@@ -28,6 +28,7 @@ TEXT_DIR     = os.getenv("TEXT_DIR",    f"{HOME_DIR}/matrix-text")
 MAP_DIR        = os.getenv("MAP_DIR",        WEATHER_DIR)  # map_display.py lives alongside weather_display.py
 COUNTDOWN_DIR  = os.getenv("COUNTDOWN_DIR",  f"{HOME_DIR}/matrix-countdown")
 SCREENSAVER_DIR= os.getenv("SCREENSAVER_DIR",f"{HOME_DIR}/matrix-screensaver")
+STOPWATCH_DIR  = os.getenv("STOPWATCH_DIR",  f"{HOME_DIR}/matrix-stopwatch")
 
 HEADERS = {}
 if DEVICE_TOKEN:
@@ -65,8 +66,10 @@ class Runner:
         self.map_proc: subprocess.Popen | None = None
         self.countdown_proc: subprocess.Popen | None = None
         self.screensaver_proc: subprocess.Popen | None = None
+        self.stopwatch_proc: subprocess.Popen | None = None
         self.timer_end_time: float = 0.0
         self.timer_duration: float = 0.0
+        self.stopwatch_start_time: float = 0.0
 
     @staticmethod
     def _is_running(p):
@@ -389,6 +392,26 @@ class Runner:
             print(f"[agent] Screensaver start error: {e}", flush=True)
             self.screensaver_proc = None
 
+    def _start_stopwatch(self):
+        if self._is_running(self.stopwatch_proc): return
+        try:
+            print("[agent] starting Stopwatch ...", flush=True)
+            cmd = [
+                "sudo", "-n", "/usr/bin/env",
+                f"HOME={HOME_DIR}", f"XDG_CACHE_HOME={HOME_DIR}/.cache", "PYTHONUNBUFFERED=1",
+                os.path.join(BASE, ".venv", "bin", "python"),
+                os.path.join(STOPWATCH_DIR, "stopwatch_display.py"),
+                "--hardware-mapping", "adafruit-hat-pwm",
+                "--gpio-slowdown", "2",
+                "--brightness", str(self.brightness),
+                "--start-time", str(self.stopwatch_start_time),
+                *self._pixel_mapper(),
+            ]
+            self.stopwatch_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
+        except Exception as e:
+            print(f"[agent] Stopwatch start error: {e}", flush=True)
+            self.stopwatch_proc = None
+
     def _kill_all(self):
         self.mlb_proc        = self._stop("mlb",        self.mlb_proc)
         self.music_proc      = self._stop("music",      self.music_proc)
@@ -400,9 +423,10 @@ class Runner:
         self.map_proc        = self._stop("map",        self.map_proc)
         self.countdown_proc  = self._stop("countdown",  self.countdown_proc)
         self.screensaver_proc= self._stop("screensaver",self.screensaver_proc)
+        self.stopwatch_proc  = self._stop("stopwatch",  self.stopwatch_proc)
         # Remove stale heartbeat files so the watchdog doesn't immediately
         # kill a freshly-started process because the old run left a stale file.
-        for m in range(1, 12):
+        for m in range(1, 13):
             hb = heartbeat_path(m)
             try:
                 os.remove(hb)
@@ -430,6 +454,7 @@ class Runner:
         elif m == 9:  self._start_map()
         elif m == 10: self._start_countdown()
         elif m == 11: self._start_screensaver()
+        elif m == 12: self._start_stopwatch()
         self.mode = m
 
     def apply_brightness(self, b: int):
@@ -459,6 +484,8 @@ class Runner:
             self.countdown_proc = self._stop("countdown", self.countdown_proc); self._start_countdown()
         if self._is_running(self.screensaver_proc):
             self.screensaver_proc = self._stop("screensaver", self.screensaver_proc); self._start_screensaver()
+        if self._is_running(self.stopwatch_proc):
+            self.stopwatch_proc = self._stop("stopwatch", self.stopwatch_proc); self._start_stopwatch()
 
     def _force_restart(self):
         """Kill whatever is running and restart the current mode with current settings."""
@@ -478,6 +505,7 @@ class Runner:
         elif m == 9:  self._start_map()
         elif m == 10: self._start_countdown()
         elif m == 11: self._start_screensaver()
+        elif m == 12: self._start_stopwatch()
 
     def apply_rotation(self, r: int):
         r = int(r)
@@ -556,6 +584,19 @@ def fetch_timer_config() -> dict:
             return r.json()
     except Exception as e:
         print(f"[agent] timer config fetch error: {e}", flush=True)
+    return {}
+
+
+def fetch_stopwatch_config() -> dict:
+    """Fetch stopwatch start_time from backend."""
+    if not BACKEND_BASE or not HEADERS:
+        return {}
+    try:
+        r = requests.get(f"{BACKEND_BASE}/stopwatch-config", headers=HEADERS, timeout=5)
+        if r.ok:
+            return r.json()
+    except Exception as e:
+        print(f"[agent] stopwatch config fetch error: {e}", flush=True)
     return {}
 
 
@@ -686,6 +727,7 @@ async def watchdog_loop(runner: Runner, interval=5, stall_s=90):
             elif mode == 9:  p = runner.map_proc
             elif mode == 10: p = runner.countdown_proc
             elif mode == 11: p = runner.screensaver_proc
+            elif mode == 12: p = runner.stopwatch_proc
 
             if p is not None and not Runner._is_running(p):
                 print(f"[agent] watchdog: mode {mode} process died; restarting", flush=True)
@@ -739,6 +781,12 @@ async def ws_loop():
         runner.timer_end_time = float(timer_cfg["end_time"])
         runner.timer_duration = float(timer_cfg.get("duration", 0))
         print(f"[agent] timer config loaded: end_time={runner.timer_end_time}, duration={runner.timer_duration}", flush=True)
+
+    # Load stopwatch config
+    sw_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_stopwatch_config)
+    if sw_cfg.get("start_time"):
+        runner.stopwatch_start_time = float(sw_cfg["start_time"])
+        print(f"[agent] stopwatch config loaded: start_time={runner.stopwatch_start_time}", flush=True)
 
     # Load schedule
     schedule_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_schedule)
@@ -818,6 +866,17 @@ async def ws_loop():
                             # Restart countdown with new end time
                             runner.countdown_proc = runner._stop("countdown", runner.countdown_proc)
                             runner._start_countdown()
+                    elif data.get("type") == "timer_expired":
+                        # Backend signals that the timer just expired — switch to mode 10
+                        print("[agent] timer_expired: switching to mode 10", flush=True)
+                        runner.apply_mode(10)
+                    elif data.get("type") == "stopwatch_config":
+                        runner.stopwatch_start_time = float(data.get("start_time", 0))
+                        print(f"[agent] stopwatch_config: start={runner.stopwatch_start_time}", flush=True)
+                        if runner.mode == 12:
+                            # Restart stopwatch with new start time
+                            runner.stopwatch_proc = runner._stop("stopwatch", runner.stopwatch_proc)
+                            runner._start_stopwatch()
                     elif data.get("type") == "schedule":
                         runner.schedule_enabled = bool(data.get("enabled", False))
                         runner.schedule_slots   = data.get("slots", [])
