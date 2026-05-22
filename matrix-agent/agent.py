@@ -25,7 +25,9 @@ WEATHER_DIR  = os.getenv("WEATHER_DIR", f"{HOME_DIR}/matrix-weather")
 PICTURE_DIR  = os.getenv("PICTURE_DIR", f"{HOME_DIR}/matrix-picture")
 DRAWING_DIR  = os.getenv("DRAWING_DIR", f"{HOME_DIR}/matrix-drawing")
 TEXT_DIR     = os.getenv("TEXT_DIR",    f"{HOME_DIR}/matrix-text")
-MAP_DIR      = os.getenv("MAP_DIR",     WEATHER_DIR)  # map_display.py lives alongside weather_display.py
+MAP_DIR        = os.getenv("MAP_DIR",        WEATHER_DIR)  # map_display.py lives alongside weather_display.py
+COUNTDOWN_DIR  = os.getenv("COUNTDOWN_DIR",  f"{HOME_DIR}/matrix-countdown")
+SCREENSAVER_DIR= os.getenv("SCREENSAVER_DIR",f"{HOME_DIR}/matrix-screensaver")
 
 HEADERS = {}
 if DEVICE_TOKEN:
@@ -61,6 +63,10 @@ class Runner:
         self.drawing_proc: subprocess.Popen | None = None
         self.text_proc: subprocess.Popen | None = None
         self.map_proc: subprocess.Popen | None = None
+        self.countdown_proc: subprocess.Popen | None = None
+        self.screensaver_proc: subprocess.Popen | None = None
+        self.timer_end_time: float = 0.0
+        self.timer_duration: float = 0.0
 
     @staticmethod
     def _is_running(p):
@@ -343,18 +349,60 @@ class Runner:
             print(f"[agent] Map start error: {e}", flush=True)
             self.map_proc = None
 
+    def _start_countdown(self):
+        if self._is_running(self.countdown_proc): return
+        try:
+            print("[agent] starting Countdown ...", flush=True)
+            cmd = [
+                "sudo", "-n", "/usr/bin/env",
+                f"HOME={HOME_DIR}", f"XDG_CACHE_HOME={HOME_DIR}/.cache", "PYTHONUNBUFFERED=1",
+                os.path.join(BASE, ".venv", "bin", "python"),
+                os.path.join(COUNTDOWN_DIR, "countdown_display.py"),
+                "--hardware-mapping", "adafruit-hat-pwm",
+                "--gpio-slowdown", "2",
+                "--brightness", str(self.brightness),
+                "--end-time", str(self.timer_end_time),
+                "--duration", str(self.timer_duration),
+                *self._pixel_mapper(),
+            ]
+            self.countdown_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
+        except Exception as e:
+            print(f"[agent] Countdown start error: {e}", flush=True)
+            self.countdown_proc = None
+
+    def _start_screensaver(self):
+        if self._is_running(self.screensaver_proc): return
+        try:
+            print("[agent] starting Screensaver ...", flush=True)
+            cmd = [
+                "sudo", "-n", "/usr/bin/env",
+                f"HOME={HOME_DIR}", f"XDG_CACHE_HOME={HOME_DIR}/.cache", "PYTHONUNBUFFERED=1",
+                os.path.join(BASE, ".venv", "bin", "python"),
+                os.path.join(SCREENSAVER_DIR, "screensaver_display.py"),
+                "--hardware-mapping", "adafruit-hat-pwm",
+                "--gpio-slowdown", "2",
+                "--brightness", str(self.brightness),
+                *self._pixel_mapper(),
+            ]
+            self.screensaver_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
+        except Exception as e:
+            print(f"[agent] Screensaver start error: {e}", flush=True)
+            self.screensaver_proc = None
+
     def _kill_all(self):
-        self.mlb_proc     = self._stop("mlb", self.mlb_proc)
-        self.music_proc   = self._stop("music", self.music_proc)
-        self.clock_proc   = self._stop("clock", self.clock_proc)
-        self.weather_proc = self._stop("weather", self.weather_proc)
-        self.picture_proc = self._stop("picture", self.picture_proc)
-        self.drawing_proc = self._stop("drawing", self.drawing_proc)
-        self.text_proc    = self._stop("text", self.text_proc)
-        self.map_proc     = self._stop("map", self.map_proc)
+        self.mlb_proc        = self._stop("mlb",        self.mlb_proc)
+        self.music_proc      = self._stop("music",      self.music_proc)
+        self.clock_proc      = self._stop("clock",      self.clock_proc)
+        self.weather_proc    = self._stop("weather",    self.weather_proc)
+        self.picture_proc    = self._stop("picture",    self.picture_proc)
+        self.drawing_proc    = self._stop("drawing",    self.drawing_proc)
+        self.text_proc       = self._stop("text",       self.text_proc)
+        self.map_proc        = self._stop("map",        self.map_proc)
+        self.countdown_proc  = self._stop("countdown",  self.countdown_proc)
+        self.screensaver_proc= self._stop("screensaver",self.screensaver_proc)
         # Remove stale heartbeat files so the watchdog doesn't immediately
         # kill a freshly-started process because the old run left a stale file.
-        for m in range(1, 10):
+        for m in range(1, 12):
             hb = heartbeat_path(m)
             try:
                 os.remove(hb)
@@ -379,7 +427,9 @@ class Runner:
         elif m == 6: self._start_drawing()
         elif m == 7: self._start_text()
         elif m == 8: self._start_music()  # Custom Music (uses same display, backend serves different content)
-        elif m == 9: self._start_map()
+        elif m == 9:  self._start_map()
+        elif m == 10: self._start_countdown()
+        elif m == 11: self._start_screensaver()
         self.mode = m
 
     def apply_brightness(self, b: int):
@@ -405,6 +455,10 @@ class Runner:
             self.text_proc = self._stop("text", self.text_proc); self._start_text()
         if self._is_running(self.map_proc):
             self.map_proc = self._stop("map", self.map_proc); self._start_map()
+        if self._is_running(self.countdown_proc):
+            self.countdown_proc = self._stop("countdown", self.countdown_proc); self._start_countdown()
+        if self._is_running(self.screensaver_proc):
+            self.screensaver_proc = self._stop("screensaver", self.screensaver_proc); self._start_screensaver()
 
     def _force_restart(self):
         """Kill whatever is running and restart the current mode with current settings."""
@@ -420,8 +474,10 @@ class Runner:
         elif m == 5: self._start_picture()
         elif m == 6: self._start_drawing()
         elif m == 7: self._start_text()
-        elif m == 8: self._start_music()
-        elif m == 9: self._start_map()
+        elif m == 8:  self._start_music()
+        elif m == 9:  self._start_map()
+        elif m == 10: self._start_countdown()
+        elif m == 11: self._start_screensaver()
 
     def apply_rotation(self, r: int):
         r = int(r)
@@ -487,6 +543,19 @@ def fetch_map_config() -> dict:
             return r.json()
     except Exception as e:
         print(f"[agent] map config fetch error: {e}", flush=True)
+    return {}
+
+
+def fetch_timer_config() -> dict:
+    """Fetch timer end_time + duration from backend."""
+    if not BACKEND_BASE or not HEADERS:
+        return {}
+    try:
+        r = requests.get(f"{BACKEND_BASE}/timer-config", headers=HEADERS, timeout=5)
+        if r.ok:
+            return r.json()
+    except Exception as e:
+        print(f"[agent] timer config fetch error: {e}", flush=True)
     return {}
 
 
@@ -613,8 +682,10 @@ async def watchdog_loop(runner: Runner, interval=5, stall_s=90):
             elif mode == 5: p = runner.picture_proc
             elif mode == 6: p = runner.drawing_proc
             elif mode == 7: p = runner.text_proc
-            elif mode == 8: p = runner.music_proc  # Custom Music uses same process
-            elif mode == 9: p = runner.map_proc
+            elif mode == 8:  p = runner.music_proc  # Custom Music uses same process
+            elif mode == 9:  p = runner.map_proc
+            elif mode == 10: p = runner.countdown_proc
+            elif mode == 11: p = runner.screensaver_proc
 
             if p is not None and not Runner._is_running(p):
                 print(f"[agent] watchdog: mode {mode} process died; restarting", flush=True)
@@ -661,6 +732,13 @@ async def ws_loop():
         runner.map_label_b = map_cfg["label_b"].strip()
     if map_cfg.get("submode") in ("basic", "map", "alternate"):
         runner.map_submode = map_cfg["submode"]
+
+    # Load timer config
+    timer_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_timer_config)
+    if timer_cfg.get("end_time"):
+        runner.timer_end_time = float(timer_cfg["end_time"])
+        runner.timer_duration = float(timer_cfg.get("duration", 0))
+        print(f"[agent] timer config loaded: end_time={runner.timer_end_time}, duration={runner.timer_duration}", flush=True)
 
     # Load schedule
     schedule_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_schedule)
@@ -732,6 +810,14 @@ async def ws_loop():
                             print("[agent] MLB is running — restarting to apply new config", flush=True)
                             runner.mlb_proc = runner._stop("mlb", runner.mlb_proc)
                             runner._start_mlb()
+                    elif data.get("type") == "timer_config":
+                        runner.timer_end_time = float(data.get("end_time", 0))
+                        runner.timer_duration = float(data.get("duration", 0))
+                        print(f"[agent] timer_config: end={runner.timer_end_time} dur={runner.timer_duration}", flush=True)
+                        if runner.mode == 10:
+                            # Restart countdown with new end time
+                            runner.countdown_proc = runner._stop("countdown", runner.countdown_proc)
+                            runner._start_countdown()
                     elif data.get("type") == "schedule":
                         runner.schedule_enabled = bool(data.get("enabled", False))
                         runner.schedule_slots   = data.get("slots", [])
