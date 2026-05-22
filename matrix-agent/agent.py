@@ -70,6 +70,9 @@ class Runner:
         self.timer_end_time: float = 0.0
         self.timer_duration: float = 0.0
         self.stopwatch_start_time: float = 0.0
+        self.screensaver_animations: str = "rain,fire,plasma"
+        self.screensaver_cycle_time: float = 25.0
+        self.screensaver_fade_time: float = 2.0
 
     @staticmethod
     def _is_running(p):
@@ -385,6 +388,9 @@ class Runner:
                 "--hardware-mapping", "adafruit-hat-pwm",
                 "--gpio-slowdown", "2",
                 "--brightness", str(self.brightness),
+                "--animations", self.screensaver_animations,
+                "--cycle-time", str(self.screensaver_cycle_time),
+                "--fade-time",  str(self.screensaver_fade_time),
                 *self._pixel_mapper(),
             ]
             self.screensaver_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
@@ -587,6 +593,19 @@ def fetch_timer_config() -> dict:
     return {}
 
 
+def fetch_screensaver_config() -> dict:
+    """Fetch screensaver animations/timing from backend."""
+    if not BACKEND_BASE or not HEADERS:
+        return {}
+    try:
+        r = requests.get(f"{BACKEND_BASE}/screensaver-config", headers=HEADERS, timeout=5)
+        if r.ok:
+            return r.json()
+    except Exception as e:
+        print(f"[agent] screensaver config fetch error: {e}", flush=True)
+    return {}
+
+
 def fetch_stopwatch_config() -> dict:
     """Fetch stopwatch start_time from backend."""
     if not BACKEND_BASE or not HEADERS:
@@ -782,6 +801,18 @@ async def ws_loop():
         runner.timer_duration = float(timer_cfg.get("duration", 0))
         print(f"[agent] timer config loaded: end_time={runner.timer_end_time}, duration={runner.timer_duration}", flush=True)
 
+    # Load screensaver config
+    ss_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_screensaver_config)
+    if ss_cfg:
+        if ss_cfg.get("animations"):
+            runner.screensaver_animations = ss_cfg["animations"]
+        if ss_cfg.get("cycle_time"):
+            runner.screensaver_cycle_time = float(ss_cfg["cycle_time"])
+        if ss_cfg.get("fade_time") is not None:
+            runner.screensaver_fade_time = float(ss_cfg["fade_time"])
+        print(f"[agent] screensaver config: anims={runner.screensaver_animations} "
+              f"cycle={runner.screensaver_cycle_time}s fade={runner.screensaver_fade_time}s", flush=True)
+
     # Load stopwatch config
     sw_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_stopwatch_config)
     if sw_cfg.get("start_time"):
@@ -870,6 +901,20 @@ async def ws_loop():
                         # Backend signals that the timer just expired — switch to mode 10
                         print("[agent] timer_expired: switching to mode 10", flush=True)
                         runner.apply_mode(10)
+                    elif data.get("type") == "screensaver_config":
+                        anims     = data.get("animations", "rain,fire,plasma")
+                        cycle_t   = float(data.get("cycle_time", 25.0))
+                        fade_t    = float(data.get("fade_time", 2.0))
+                        changed   = (anims   != runner.screensaver_animations or
+                                     cycle_t != runner.screensaver_cycle_time  or
+                                     fade_t  != runner.screensaver_fade_time)
+                        runner.screensaver_animations = anims
+                        runner.screensaver_cycle_time = cycle_t
+                        runner.screensaver_fade_time  = fade_t
+                        print(f"[agent] screensaver_config: anims={anims} cycle={cycle_t}s fade={fade_t}s", flush=True)
+                        if changed and runner.mode == 11:
+                            runner.screensaver_proc = runner._stop("screensaver", runner.screensaver_proc)
+                            runner._start_screensaver()
                     elif data.get("type") == "stopwatch_config":
                         runner.stopwatch_start_time = float(data.get("start_time", 0))
                         print(f"[agent] stopwatch_config: start={runner.stopwatch_start_time}", flush=True)

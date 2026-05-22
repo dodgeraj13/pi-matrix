@@ -9,108 +9,121 @@ from apps_v2 import spotify_player
 from modules import spotify_module
 
 
-# ── PIL-based screensaver animations ─────────────────────────────────────────
+# ── PIL-based animation helpers ───────────────────────────────────────────────
+
+class _RainAnim:
+    NUM_DROPS = 45
+    def __init__(self):
+        self.drops = [self._new_drop(random.randint(0, 63)) for _ in range(self.NUM_DROPS)]
+    def _new_drop(self, y=None):
+        return {"x": random.randint(0, 63), "y": float(random.randint(-20, 0) if y is None else y),
+                "speed": random.uniform(0.4, 1.8), "length": random.randint(4, 16), "bright": random.randint(140, 255)}
+    def reset(self): self.__init__()
+    def get_pil_frame(self) -> Image.Image:
+        img = Image.new("RGB", (64, 64), (0, 0, 0))
+        px = img.load()
+        for i in range(len(self.drops)):
+            d = self.drops[i]
+            d["y"] += d["speed"]
+            if d["y"] - d["length"] > 64:
+                self.drops[i] = self._new_drop(); continue
+            for j in range(d["length"]):
+                py = int(d["y"]) - j
+                if 0 <= py < 64:
+                    fade = 1.0 - j / d["length"]
+                    if j == 0: px[d["x"], py] = (int(180*fade), 255, int(180*fade))
+                    else: px[d["x"], py] = (0, int(d["bright"]*fade*fade), 0)
+        return img
+
+
+class _FireAnim:
+    def __init__(self): self.heat = [[0]*64 for _ in range(64)]
+    def reset(self): self.heat = [[0]*64 for _ in range(64)]
+    @staticmethod
+    def _h2rgb(h):
+        if h < 30: return 0, 0, 0
+        elif h < 90: t=(h-30)/60; return int(t*200), 0, 0
+        elif h < 160: t=(h-90)/70; return 200+int(t*55), int(t*90), 0
+        elif h < 220: t=(h-160)/60; return 255, 90+int(t*140), 0
+        else: t=min((h-220)/35,1.0); return 255, 230+int(t*25), int(t*120)
+    def get_pil_frame(self) -> Image.Image:
+        ht = self.heat
+        for x in range(64): ht[63][x] = random.randint(180, 255)
+        for y in range(62, -1, -1):
+            for x in range(64):
+                avg = (ht[y+1][(x-1)%64] + ht[y+1][x] + ht[y+1][(x+1)%64]) // 3
+                ht[y][x] = max(0, avg - random.randint(3, 10))
+        img = Image.new("RGB", (64, 64))
+        px = img.load()
+        for y in range(64):
+            for x in range(64): px[x, y] = self._h2rgb(ht[y][x])
+        return img
+
+
+class _PlasmaAnim:
+    def __init__(self):
+        self.t = 0.0
+        self._sx = [math.sin(x/5.0) for x in range(64)]
+        self._sy = [math.sin(y/4.0) for y in range(64)]
+        self._sxy= [math.sin((x+y)/7.0) for x in range(64) for y in range(64)]
+        cx=cy=32
+        self._rad= [math.sin(math.sqrt((x-cx)**2+(y-cy)**2)/6.0) for x in range(64) for y in range(64)]
+    def reset(self): self.t = 0.0
+    def get_pil_frame(self) -> Image.Image:
+        t=self.t; st=math.sin(t); ct=math.cos(t*.8); st2=math.sin(t*1.3)
+        img = Image.new("RGB", (64, 64))
+        px = img.load()
+        for x in range(64):
+            sx = self._sx[x]+st
+            for y in range(64):
+                v=sx+self._sy[y]+ct+self._sxy[x*64+y]+st2+self._rad[x*64+y]
+                h=((v*30)+t*40)%360; r,g,b=_hsv_to_rgb(h,1.0,0.85)
+                px[x,y]=(r,g,b)
+        self.t+=0.045
+        return img
+
+
+# ── PIL Screensaver orchestrator ──────────────────────────────────────────────
 
 class _PilScreensaver:
-    """Cycles through 3 animations: Matrix rain → Fire → Plasma."""
+    """Cycles configured animations with smooth Image.blend() crossfade."""
 
-    W = H = 64
-    CYCLE_SECONDS = 25  # seconds per animation
+    _ANIMS = {"rain": _RainAnim, "fire": _FireAnim, "plasma": _PlasmaAnim}
 
-    def __init__(self):
-        self._t0 = time.time()
-        self._frame = 0
-        # Matrix rain
-        self._rain_cols = [random.randint(0, self.H - 1) for _ in range(self.W)]
-        self._rain_speeds = [random.uniform(0.3, 1.0) for _ in range(self.W)]
-        self._rain_buf = [[0] * self.H for _ in range(self.W)]
-        # Fire
-        self._fire = [[0.0] * self.H for _ in range(self.W)]
-        # Plasma (precompute nothing — compute per pixel each frame)
-
-    def _phase(self) -> int:
-        """Returns 0=rain, 1=fire, 2=plasma"""
-        elapsed = time.time() - self._t0
-        return int(elapsed / self.CYCLE_SECONDS) % 3
+    def __init__(self, animations: str = "rain,fire,plasma",
+                 cycle_time: float = 25.0, fade_time: float = 2.0):
+        chosen = [a.strip() for a in animations.split(",") if a.strip() in self._ANIMS]
+        if not chosen:
+            chosen = ["rain", "fire", "plasma"]
+        self._active = [(n, self._ANIMS[n]()) for n in chosen]
+        self._cycle  = max(3.0, cycle_time)
+        self._fade   = max(0.0, min(fade_time, self._cycle * 0.4))
+        self._idx    = 0
+        self._start  = time.time()
+        self._next_reset_done = False
 
     def next_frame(self) -> Image.Image:
-        self._frame += 1
-        phase = self._phase()
-        if phase == 0:
-            return self._rain_frame()
-        elif phase == 1:
-            return self._fire_frame()
+        now     = time.time()
+        elapsed = now - self._start
+
+        if elapsed >= self._cycle:
+            self._idx   = (self._idx + 1) % len(self._active)
+            self._start = now
+            elapsed     = 0.0
+            self._next_reset_done = False
+
+        fade_thresh = self._cycle - self._fade
+        if self._fade > 0 and elapsed >= fade_thresh:
+            nxt = (self._idx + 1) % len(self._active)
+            if not self._next_reset_done:
+                self._active[nxt][1].reset()
+                self._next_reset_done = True
+            alpha = min(1.0, (elapsed - fade_thresh) / self._fade)
+            f1 = self._active[self._idx][1].get_pil_frame()
+            f2 = self._active[nxt][1].get_pil_frame()
+            return Image.blend(f1.convert("RGB"), f2.convert("RGB"), alpha)
         else:
-            return self._plasma_frame()
-
-    # ── Matrix rain ──
-    def _rain_frame(self) -> Image.Image:
-        img = Image.new("RGB", (self.W, self.H), (0, 0, 0))
-        px = img.load()
-        # Fade existing buffer
-        for x in range(self.W):
-            for y in range(self.H):
-                v = self._rain_buf[x][y]
-                self._rain_buf[x][y] = max(0, v - 18)
-        # Advance drops
-        for x in range(self.W):
-            if random.random() < self._rain_speeds[x] * 0.3:
-                head = self._rain_cols[x]
-                self._rain_buf[x][head % self.H] = 255
-                self._rain_cols[x] = (head + 1) % self.H
-        # Draw
-        for x in range(self.W):
-            for y in range(self.H):
-                v = self._rain_buf[x][y]
-                if v > 200:
-                    px[x, y] = (180, 255, 180)
-                elif v > 0:
-                    px[x, y] = (0, v, 0)
-        return img
-
-    # ── Fire ──
-    def _fire_frame(self) -> Image.Image:
-        W, H = self.W, self.H
-        f = self._fire
-        # Seed bottom row
-        for x in range(W):
-            f[x][H - 1] = random.uniform(0.8, 1.0)
-        # Propagate upward
-        for y in range(H - 1):
-            for x in range(W):
-                left = f[(x - 1) % W][y + 1]
-                mid  = f[x][y + 1]
-                right= f[(x + 1) % W][y + 1]
-                f[x][y] = max(0.0, (left + mid + right) / 3.0 - random.uniform(0.0, 0.08))
-        # Render
-        img = Image.new("RGB", (W, H), (0, 0, 0))
-        px = img.load()
-        for x in range(W):
-            for y in range(H):
-                v = f[x][y]
-                r = min(255, int(v * 255))
-                g = min(255, int(max(0, v - 0.5) * 2 * 200))
-                b = min(255, int(max(0, v - 0.8) * 5 * 255))
-                px[x, y] = (r, g, b)
-        return img
-
-    # ── Plasma ──
-    def _plasma_frame(self) -> Image.Image:
-        t = time.time() * 1.5
-        img = Image.new("RGB", (self.W, self.H), (0, 0, 0))
-        px = img.load()
-        for x in range(self.W):
-            for y in range(self.H):
-                cx = x + 0.5 * math.sin(t / 3)
-                cy = y + 0.5 * math.cos(t / 2)
-                v = (math.sin(x / 8.0 + t) +
-                     math.sin(y / 6.0 + t * 1.3) +
-                     math.sin((x + y) / 10.0 + t * 0.7) +
-                     math.sin(math.sqrt(cx * cx + cy * cy) / 4.0 + t)) / 4.0
-                h = (v + 1.0) / 2.0  # 0..1
-                r, g, b = _hsv_to_rgb(h, 1.0, 1.0)
-                px[x, y] = (int(r * 255), int(g * 255), int(b * 255))
-        return img
+            return self._active[self._idx][1].get_pil_frame()
 
 
 def _hsv_to_rgb(h: float, s: float, v: float):
@@ -135,15 +148,26 @@ def _hsv_to_rgb(h: float, s: float, v: float):
 def _fetch_idle_fallback(backend_base: str, device_token: str) -> str:
     """Fetch idle_fallback setting from backend. Returns empty string on failure."""
     try:
-        import urllib.request
+        import urllib.request, json
         url = f"{backend_base}/idle-fallback"
         req = urllib.request.Request(url, headers={"X-Device-Token": device_token})
         with urllib.request.urlopen(req, timeout=5) as resp:
-            import json
             data = json.loads(resp.read())
             return data.get("idle_fallback", "")
     except Exception:
         return ""
+
+
+def _fetch_screensaver_config(backend_base: str, device_token: str) -> dict:
+    """Fetch screensaver animations/timing from backend."""
+    try:
+        import urllib.request, json
+        url = f"{backend_base}/screensaver-config"
+        req = urllib.request.Request(url, headers={"X-Device-Token": device_token})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return {}
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -214,13 +238,15 @@ def main():
     backend_base = config.get('Spotify', 'backend_url', fallback='').rstrip('/')
     device_token = config.get('Spotify', 'device_token', fallback='')
 
-    # Idle fallback — refresh every 60 s
+    # Idle fallback + screensaver config — refresh every 60 s
     idle_fallback = ""
+    ss_config: dict = {}
     last_fallback_check = 0.0
     FALLBACK_REFRESH = 60.0
 
-    # Screensaver instance (created lazily when first needed)
+    # Screensaver instance (created lazily / recreated when config changes)
     screensaver: _PilScreensaver | None = None
+    last_ss_config_key: str = ""  # track config to detect changes
 
     # main loop
     while True:
@@ -234,23 +260,33 @@ def main():
                 if is_playing:
                     last_active_time = current_time
 
-            # Refresh idle-fallback setting periodically
+            # Refresh idle-fallback + screensaver config periodically
             if backend_base and device_token and (current_time - last_fallback_check) > FALLBACK_REFRESH:
                 idle_fallback = _fetch_idle_fallback(backend_base, device_token)
+                ss_config     = _fetch_screensaver_config(backend_base, device_token)
                 last_fallback_check = current_time
 
             # Decide what to show
             if is_playing:
                 # actively playing: prefer fresh frame, else fall back to cache, else black
                 frame_to_show = frame if frame is not None else (last_frame if last_frame is not None else black_screen)
-                # Reset screensaver when music resumes
+                # Reset screensaver when music resumes so it starts fresh next time
                 screensaver = None
+                last_ss_config_key = ""
             else:
                 # paused / stopped
                 if idle_fallback == "screensaver":
-                    # Screensaver animation
-                    if screensaver is None:
-                        screensaver = _PilScreensaver()
+                    # Build a config key so we recreate if settings changed
+                    cfg_key = (f"{ss_config.get('animations','rain,fire,plasma')}|"
+                               f"{ss_config.get('cycle_time',25)}|"
+                               f"{ss_config.get('fade_time',2)}")
+                    if screensaver is None or cfg_key != last_ss_config_key:
+                        screensaver = _PilScreensaver(
+                            animations=str(ss_config.get("animations", "rain,fire,plasma")),
+                            cycle_time=float(ss_config.get("cycle_time", 25.0)),
+                            fade_time =float(ss_config.get("fade_time",  2.0)),
+                        )
+                        last_ss_config_key = cfg_key
                     frame_to_show = screensaver.next_frame()
                 else:
                     # Hold last art until shutdown_delay, then black
@@ -260,6 +296,7 @@ def main():
                     else:
                         frame_to_show = black_screen
                     screensaver = None
+                    last_ss_config_key = ""
 
             matrix.SetImage(frame_to_show)
             time.sleep(0.08)
