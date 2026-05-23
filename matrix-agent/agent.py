@@ -17,18 +17,20 @@ _ws_base     = os.getenv("WS_URL") or (BACKEND_BASE.replace("https://","wss://")
 WS_URL       = f"{_ws_base}?device={DEVICE_TOKEN}" if DEVICE_TOKEN and "?device=" not in _ws_base else _ws_base
 
 HOME_DIR     = os.getenv("HOME_DIR", f"/home/{os.getenv('USER', 'pi_two')}")
-MLB_DIR      = os.getenv("MLB_DIR",     f"{HOME_DIR}/mlb-led-scoreboard")
-MUSIC_DIR    = os.getenv("MUSIC_DIR",   f"{HOME_DIR}/rpi-spotify-matrix-display")
+REPO_ROOT    = str(BASE.parent)  # one level up from matrix-agent/ = repo root
+
+MLB_DIR      = os.getenv("MLB_DIR",     f"{REPO_ROOT}/mlb-led-scoreboard")
+MUSIC_DIR    = os.getenv("MUSIC_DIR",   f"{HOME_DIR}/rpi-spotify-matrix-display")  # separate repo
 MUSIC_IMPL   = os.path.join(MUSIC_DIR, "impl")
-CLOCK_DIR    = os.getenv("CLOCK_DIR",   f"{HOME_DIR}/matrix-clock")
-WEATHER_DIR  = os.getenv("WEATHER_DIR", f"{HOME_DIR}/matrix-weather")
-PICTURE_DIR  = os.getenv("PICTURE_DIR", f"{HOME_DIR}/matrix-picture")
-DRAWING_DIR  = os.getenv("DRAWING_DIR", f"{HOME_DIR}/matrix-drawing")
-TEXT_DIR     = os.getenv("TEXT_DIR",    f"{HOME_DIR}/matrix-text")
+CLOCK_DIR    = os.getenv("CLOCK_DIR",   f"{REPO_ROOT}/matrix-clock")
+WEATHER_DIR  = os.getenv("WEATHER_DIR", f"{REPO_ROOT}/matrix-weather")
+PICTURE_DIR  = os.getenv("PICTURE_DIR", f"{REPO_ROOT}/matrix-picture")
+DRAWING_DIR  = os.getenv("DRAWING_DIR", f"{REPO_ROOT}/matrix-drawing")
+TEXT_DIR     = os.getenv("TEXT_DIR",    f"{REPO_ROOT}/matrix-text")
 MAP_DIR        = os.getenv("MAP_DIR",        WEATHER_DIR)  # map_display.py lives alongside weather_display.py
-COUNTDOWN_DIR  = os.getenv("COUNTDOWN_DIR",  f"{HOME_DIR}/matrix-countdown")
-SCREENSAVER_DIR= os.getenv("SCREENSAVER_DIR",f"{HOME_DIR}/matrix-screensaver")
-STOPWATCH_DIR  = os.getenv("STOPWATCH_DIR",  f"{HOME_DIR}/matrix-stopwatch")
+COUNTDOWN_DIR  = os.getenv("COUNTDOWN_DIR",  f"{REPO_ROOT}/matrix-countdown")
+SCREENSAVER_DIR= os.getenv("SCREENSAVER_DIR",f"{REPO_ROOT}/matrix-screensaver")
+STOPWATCH_DIR  = os.getenv("STOPWATCH_DIR",  f"{REPO_ROOT}/matrix-stopwatch")
 
 HEADERS = {}
 if DEVICE_TOKEN:
