@@ -136,7 +136,7 @@ _font_tiny  = None   # "1D" / "1W" sparkline labels
 def _init_fonts():
     global _font_sym, _font_price, _font_pct, _font_tiny
     _font_sym   = _load_font(9)    # much smaller than original 16
-    _font_price = _load_font(12)
+    _font_price = _load_font(11)
     _font_pct   = _load_font(10)
     _font_tiny  = _load_font(7)
 
@@ -178,15 +178,15 @@ def _draw_sparkline(draw, points, x0, y_top, y_bot, color=(100, 200, 100)):
 #    │ 1W ~~~~~~~~~~~~~~~~~~~~~~~~  │  Y=46..62
 # 63 └──────────────────────────────┘
 
-_Y_SYM    = 1
-_Y_PRICE  = 11
-_Y_PCT    = 24
-_Y_SEP1   = 33
-_Y_1D_TOP = 35
-_Y_1D_BOT = 44
-_Y_SEP2   = 45
-_Y_1W_TOP = 46
-_Y_1W_BOT = 62
+_Y_SYM    = 1    # font=9  → ~8px tall → ends ~9
+_Y_PRICE  = 11   # font=11 → ~10px tall → ends ~21
+_Y_PCT    = 23   # font=10 → ~9px tall  → ends ~32
+_Y_SEP1   = 34
+_Y_1D_TOP = 36
+_Y_1D_BOT = 45
+_Y_SEP2   = 47
+_Y_1W_TOP = 49
+_Y_1W_BOT = 63
 _X_LABEL  = 1    # x of "1D"/"1W" text
 _X_SPARK  = 15   # x where sparkline begins (after label)
 
