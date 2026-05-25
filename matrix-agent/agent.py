@@ -203,9 +203,9 @@ class Runner:
 
     def _launch(self, name: str, script: str, extra_args=(), extra_env=(), cwd=None) -> "subprocess.Popen | None":
         """Start a standard LED display script under sudo with shared hardware args."""
-        py = os.path.join(BASE, ".venv", "bin", "python")
-        if not os.access(py, os.X_OK):
-            py = sys.executable  # fall back to the interpreter running the agent
+        # Always use the same interpreter that's running the agent — this guarantees
+        # the same venv/packages (rgbmatrix, PIL, requests) regardless of BASE location.
+        py = sys.executable
         env_prefix = [
             f"HOME={HOME_DIR}", f"XDG_CACHE_HOME={HOME_DIR}/.cache", "PYTHONUNBUFFERED=1",
             *extra_env,
@@ -318,7 +318,7 @@ class Runner:
         for key in ("WEATHER_API_KEY", "MAPBOX_TOKEN"):
             if v := os.getenv(key, ""):
                 extra.append(f"{key}={v}")
-        py = os.path.join(BASE, ".venv", "bin", "python")
+        py = sys.executable
         env_prefix = [f"HOME={HOME_DIR}", f"XDG_CACHE_HOME={HOME_DIR}/.cache", "PYTHONUNBUFFERED=1", *extra]
         cmd = ["sudo", "-n", "/usr/bin/env", *env_prefix, py,
                os.path.join(MAP_DIR, "map_display.py"), *self._pixel_mapper()]
