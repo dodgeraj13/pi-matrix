@@ -204,6 +204,8 @@ class Runner:
     def _launch(self, name: str, script: str, extra_args=(), extra_env=(), cwd=None) -> "subprocess.Popen | None":
         """Start a standard LED display script under sudo with shared hardware args."""
         py = os.path.join(BASE, ".venv", "bin", "python")
+        if not os.access(py, os.X_OK):
+            py = sys.executable  # fall back to the interpreter running the agent
         env_prefix = [
             f"HOME={HOME_DIR}", f"XDG_CACHE_HOME={HOME_DIR}/.cache", "PYTHONUNBUFFERED=1",
             *extra_env,
