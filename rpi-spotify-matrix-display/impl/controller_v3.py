@@ -60,7 +60,17 @@ def main():
 
     # generate image
     while(True):
-        frame, is_playing = app_list[0].generate()
+        try:
+            result = app_list[0].generate()
+            # generate() can return None or a non-iterable (e.g. False) when the
+            # Spotify module has no current playback data or hits an API error.
+            if isinstance(result, tuple) and len(result) == 2:
+                frame, is_playing = result
+            else:
+                frame, is_playing = None, False
+        except Exception as e:
+            print(f"[spotify] generate error: {e}", flush=True)
+            frame, is_playing = None, False
         current_time = math.floor(time.time())
 
         if frame is not None:
