@@ -362,13 +362,17 @@ class Runner:
     def _kill_all(self):
         for attr in _ALL_PROCS:
             setattr(self, attr, self._stop(attr.replace("_proc", ""), getattr(self, attr)))
-        # Remove stale heartbeat files so the watchdog doesn't immediately
-        # kill a freshly-started process because the old run left a stale file.
-        for m in range(1, 15):
-            try:
-                os.remove(heartbeat_path(m))
-            except (FileNotFoundError, PermissionError):
-                pass
+        # Remove stale heartbeat files. Display scripts run as root (sudo), so
+        # the files are root-owned and os.remove() fails for the pi_two agent.
+        # Use sudo rm to ensure deletion regardless of ownership.
+        hb_files = [heartbeat_path(m) for m in range(1, 15)]
+        try:
+            subprocess.run(
+                ["sudo", "-n", "rm", "-f", *hb_files],
+                capture_output=True, timeout=5
+            )
+        except Exception:
+            pass
 
     def _dispatch(self, m: int):
         """Start the process for mode m (does NOT kill others — caller must)."""
