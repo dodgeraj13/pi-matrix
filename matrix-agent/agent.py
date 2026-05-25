@@ -44,6 +44,27 @@ def heartbeat_path(mode:int) -> str:
 def _now() -> float:
     return time.time()
 
+# Maps mode int → (proc_attr_name, start_method_name)
+# Modes 2 and 8 share the same process (music_proc / _start_music).
+_MODES: dict[int, tuple[str, str]] = {
+    1:  ("mlb_proc",         "_start_mlb"),
+    2:  ("music_proc",       "_start_music"),
+    3:  ("clock_proc",       "_start_clock"),
+    4:  ("weather_proc",     "_start_weather"),
+    5:  ("picture_proc",     "_start_picture"),
+    6:  ("drawing_proc",     "_start_drawing"),
+    7:  ("text_proc",        "_start_text"),
+    8:  ("music_proc",       "_start_music"),
+    9:  ("map_proc",         "_start_map"),
+    10: ("countdown_proc",   "_start_countdown"),
+    11: ("screensaver_proc", "_start_screensaver"),
+    12: ("stopwatch_proc",   "_start_stopwatch"),
+}
+
+# Ordered list of unique proc attributes for kill-all / brightness loops
+_ALL_PROCS = list(dict.fromkeys(attr for attr, _ in _MODES.values()))
+
+
 class Runner:
     def __init__(self):
         self.mode = 0
@@ -117,8 +138,7 @@ class Runner:
     def get_effective_brightness(self) -> int:
         """Return idle_brightness when dim schedule is active, else normal_brightness."""
         if self.dim_schedule_enabled and self.dim_start and self.dim_end:
-            import datetime as _dt
-            ct = _dt.datetime.now().strftime("%H:%M")
+            ct = datetime.datetime.now().strftime("%H:%M")
             s, e = self.dim_start, self.dim_end
             in_dim = (s <= ct < e) if s <= e else (ct >= s or ct < e)
             if in_dim:
@@ -175,6 +195,29 @@ class Runner:
         with open(ini_path, "w") as f:
             cfg.write(f)
 
+    def _launch(self, name: str, script: str, extra_args=(), extra_env=(), cwd=None) -> "subprocess.Popen | None":
+        """Start a standard LED display script under sudo with shared hardware args."""
+        py = os.path.join(BASE, ".venv", "bin", "python")
+        env_prefix = [
+            f"HOME={HOME_DIR}", f"XDG_CACHE_HOME={HOME_DIR}/.cache", "PYTHONUNBUFFERED=1",
+            *extra_env,
+        ]
+        cmd = [
+            "sudo", "-n", "/usr/bin/env", *env_prefix,
+            py, script,
+            "--hardware-mapping", "adafruit-hat-pwm",
+            "--gpio-slowdown", "2",
+            "--brightness", str(self.brightness),
+            *self._pixel_mapper(),
+            *extra_args,
+        ]
+        try:
+            print(f"[agent] starting {name} ...", flush=True)
+            return subprocess.Popen(cmd, cwd=cwd, start_new_session=True, env=self._child_env())
+        except Exception as e:
+            print(f"[agent] {name} start error: {e}", flush=True)
+            return None
+
     def _start_mlb(self):
         if self._is_running(self.mlb_proc): return
         try:
@@ -220,265 +263,106 @@ class Runner:
 
     def _start_clock(self):
         if self._is_running(self.clock_proc): return
-        try:
-            print("[agent] starting Clock ...", flush=True)
-            os.chdir(CLOCK_DIR)
-            cmd = [
-                "sudo","-n","/usr/bin/env",
-                f"HOME={HOME_DIR}",f"XDG_CACHE_HOME={HOME_DIR}/.cache","PYTHONUNBUFFERED=1",
-                os.path.join(BASE, ".venv", "bin", "python"),
-                os.path.join(CLOCK_DIR, "clock_display.py"),
-                "--hardware-mapping","adafruit-hat-pwm",
-                "--gpio-slowdown","2",
-                "--brightness", str(self.brightness),
-                *self._pixel_mapper(),
-            ]
-            self.clock_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
-        except Exception as e:
-            print(f"[agent] Clock start error: {e}", flush=True)
-            self.clock_proc = None
+        self.clock_proc = self._launch("clock", os.path.join(CLOCK_DIR, "clock_display.py"))
 
     def _start_weather(self):
         if self._is_running(self.weather_proc): return
-        try:
-            print("[agent] starting Weather ...", flush=True)
-            os.chdir(WEATHER_DIR)
-            # sudo strips the environment, so pass secrets explicitly via /usr/bin/env
-            weather_api_key = os.getenv("WEATHER_API_KEY", "")
-            explicit_env = [
-                f"HOME={HOME_DIR}",
-                f"XDG_CACHE_HOME={HOME_DIR}/.cache",
-                "PYTHONUNBUFFERED=1",
-            ]
-            if weather_api_key:
-                explicit_env.append(f"WEATHER_API_KEY={weather_api_key}")
-            if self.location:
-                explicit_env.append(f"WEATHER_LOCATION={self.location}")
-            if self.units:
-                explicit_env.append(f"WEATHER_UNITS={self.units}")
-            cmd = [
-                "sudo","-n","/usr/bin/env",
-                *explicit_env,
-                os.path.join(BASE, ".venv", "bin", "python"),
-                os.path.join(WEATHER_DIR, "weather_display.py"),
-                "--hardware-mapping","adafruit-hat-pwm",
-                "--gpio-slowdown","2",
-                "--brightness", str(self.brightness),
-                *self._pixel_mapper(),
-            ]
-            self.weather_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
-        except Exception as e:
-            print(f"[agent] Weather start error: {e}", flush=True)
-            self.weather_proc = None
+        extra = []
+        for key, val in [("WEATHER_API_KEY", os.getenv("WEATHER_API_KEY", "")),
+                         ("WEATHER_LOCATION", self.location),
+                         ("WEATHER_UNITS", self.units)]:
+            if val:
+                extra.append(f"{key}={val}")
+        self.weather_proc = self._launch("weather", os.path.join(WEATHER_DIR, "weather_display.py"),
+                                         extra_env=extra)
+
+    def _backend_args(self):
+        args = ["--api-base", BACKEND_BASE]
+        if DEVICE_TOKEN:
+            args += ["--device-token", DEVICE_TOKEN]
+        return args
 
     def _start_picture(self):
         if self._is_running(self.picture_proc): return
-        try:
-            print("[agent] starting Picture ...", flush=True)
-            os.chdir(PICTURE_DIR if os.path.exists(PICTURE_DIR) else BASE)
-            cmd = [
-                "sudo","-n","/usr/bin/env",
-                f"HOME={HOME_DIR}",f"XDG_CACHE_HOME={HOME_DIR}/.cache","PYTHONUNBUFFERED=1",
-                os.path.join(BASE, ".venv", "bin", "python"),
-                os.path.join(PICTURE_DIR, "picture.py"),
-                "--api-base", BACKEND_BASE,
-                "--hardware-mapping","adafruit-hat-pwm",
-                "--gpio-slowdown","2",
-                "--brightness", str(self.brightness),
-                *self._pixel_mapper(),
-                *(["--device-token", DEVICE_TOKEN] if DEVICE_TOKEN else []),
-            ]
-            self.picture_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
-        except Exception as e:
-            print(f"[agent] Picture start error: {e}", flush=True)
-            self.picture_proc = None
+        self.picture_proc = self._launch("picture", os.path.join(PICTURE_DIR, "picture.py"),
+                                         extra_args=self._backend_args())
 
     def _start_drawing(self):
         if self._is_running(self.drawing_proc): return
-        try:
-            print("[agent] starting Drawing ...", flush=True)
-            os.chdir(DRAWING_DIR if os.path.exists(DRAWING_DIR) else BASE)
-            cmd = [
-                "sudo","-n","/usr/bin/env",
-                f"HOME={HOME_DIR}",f"XDG_CACHE_HOME={HOME_DIR}/.cache","PYTHONUNBUFFERED=1",
-                os.path.join(BASE, ".venv", "bin", "python"),
-                os.path.join(DRAWING_DIR, "drawing_display.py"),
-                "--api-base", BACKEND_BASE,
-                "--hardware-mapping","adafruit-hat-pwm",
-                "--gpio-slowdown","2",
-                "--brightness", str(self.brightness),
-                *self._pixel_mapper(),
-                *(["--device-token", DEVICE_TOKEN] if DEVICE_TOKEN else []),
-            ]
-            self.drawing_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
-        except Exception as e:
-            print(f"[agent] Drawing start error: {e}", flush=True)
-            self.drawing_proc = None
+        self.drawing_proc = self._launch("drawing", os.path.join(DRAWING_DIR, "drawing_display.py"),
+                                          extra_args=self._backend_args())
 
     def _start_text(self):
         if self._is_running(self.text_proc): return
-        try:
-            print("[agent] starting Text ...", flush=True)
-            os.chdir(TEXT_DIR if os.path.exists(TEXT_DIR) else BASE)
-            cmd = [
-                "sudo","-n","/usr/bin/env",
-                f"HOME={HOME_DIR}",f"XDG_CACHE_HOME={HOME_DIR}/.cache","PYTHONUNBUFFERED=1",
-                os.path.join(BASE, ".venv", "bin", "python"),
-                os.path.join(TEXT_DIR, "text_display.py"),
-                "--api-base", BACKEND_BASE,
-                "--hardware-mapping","adafruit-hat-pwm",
-                "--gpio-slowdown","2",
-                "--brightness", str(self.brightness),
-                *self._pixel_mapper(),
-                *(["--device-token", DEVICE_TOKEN] if DEVICE_TOKEN else []),
-            ]
-            self.text_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
-        except Exception as e:
-            print(f"[agent] Text start error: {e}", flush=True)
-            self.text_proc = None
+        self.text_proc = self._launch("text", os.path.join(TEXT_DIR, "text_display.py"),
+                                       extra_args=self._backend_args())
 
     def _start_map(self):
         if self._is_running(self.map_proc): return
         if not self.map_address_a or not self.map_address_b:
             print("[agent] Map mode: MAP_ADDRESS_A/B not set, skipping", flush=True)
             return
+        extra = [
+            f"MAP_ADDRESS_A={self.map_address_a}", f"MAP_ADDRESS_B={self.map_address_b}",
+            f"MAP_LABEL_A={self.map_label_a}",     f"MAP_LABEL_B={self.map_label_b}",
+            f"MAP_SUBMODE={self.map_submode}",      f"WEATHER_UNITS={self.units}",
+        ]
+        for key in ("WEATHER_API_KEY", "MAPBOX_TOKEN"):
+            if v := os.getenv(key, ""):
+                extra.append(f"{key}={v}")
+        py = os.path.join(BASE, ".venv", "bin", "python")
+        env_prefix = [f"HOME={HOME_DIR}", f"XDG_CACHE_HOME={HOME_DIR}/.cache", "PYTHONUNBUFFERED=1", *extra]
+        cmd = ["sudo", "-n", "/usr/bin/env", *env_prefix, py,
+               os.path.join(MAP_DIR, "map_display.py"), *self._pixel_mapper()]
         try:
-            print("[agent] starting Map ...", flush=True)
-            weather_api_key = os.getenv("WEATHER_API_KEY", "")
-            mapbox_token    = os.getenv("MAPBOX_TOKEN", "")
-            explicit_env = [
-                f"HOME={HOME_DIR}",
-                f"XDG_CACHE_HOME={HOME_DIR}/.cache",
-                "PYTHONUNBUFFERED=1",
-                f"MAP_ADDRESS_A={self.map_address_a}",
-                f"MAP_ADDRESS_B={self.map_address_b}",
-                f"MAP_LABEL_A={self.map_label_a}",
-                f"MAP_LABEL_B={self.map_label_b}",
-                f"MAP_SUBMODE={self.map_submode}",
-                f"WEATHER_UNITS={self.units}",
-            ]
-            if weather_api_key:
-                explicit_env.append(f"WEATHER_API_KEY={weather_api_key}")
-            if mapbox_token:
-                explicit_env.append(f"MAPBOX_TOKEN={mapbox_token}")
-            cmd = [
-                "sudo", "-n", "/usr/bin/env",
-                *explicit_env,
-                os.path.join(BASE, ".venv", "bin", "python"),
-                os.path.join(MAP_DIR, "map_display.py"),
-                *self._pixel_mapper(),
-            ]
+            print("[agent] starting map ...", flush=True)
             self.map_proc = subprocess.Popen(cmd, cwd=MAP_DIR, start_new_session=True, env=self._child_env())
         except Exception as e:
-            print(f"[agent] Map start error: {e}", flush=True)
+            print(f"[agent] map start error: {e}", flush=True)
             self.map_proc = None
 
     def _start_countdown(self):
         if self._is_running(self.countdown_proc): return
-        try:
-            print("[agent] starting Countdown ...", flush=True)
-            cmd = [
-                "sudo", "-n", "/usr/bin/env",
-                f"HOME={HOME_DIR}", f"XDG_CACHE_HOME={HOME_DIR}/.cache", "PYTHONUNBUFFERED=1",
-                os.path.join(BASE, ".venv", "bin", "python"),
-                os.path.join(COUNTDOWN_DIR, "countdown_display.py"),
-                "--hardware-mapping", "adafruit-hat-pwm",
-                "--gpio-slowdown", "2",
-                "--brightness", str(self.brightness),
-                "--end-time", str(self.timer_end_time),
-                "--duration", str(self.timer_duration),
-                *self._pixel_mapper(),
-            ]
-            self.countdown_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
-        except Exception as e:
-            print(f"[agent] Countdown start error: {e}", flush=True)
-            self.countdown_proc = None
+        self.countdown_proc = self._launch(
+            "countdown", os.path.join(COUNTDOWN_DIR, "countdown_display.py"),
+            extra_args=["--end-time", str(self.timer_end_time), "--duration", str(self.timer_duration)])
 
     def _start_screensaver(self):
         if self._is_running(self.screensaver_proc): return
-        try:
-            print("[agent] starting Screensaver ...", flush=True)
-            cmd = [
-                "sudo", "-n", "/usr/bin/env",
-                f"HOME={HOME_DIR}", f"XDG_CACHE_HOME={HOME_DIR}/.cache", "PYTHONUNBUFFERED=1",
-                os.path.join(BASE, ".venv", "bin", "python"),
-                os.path.join(SCREENSAVER_DIR, "screensaver_display.py"),
-                "--hardware-mapping", "adafruit-hat-pwm",
-                "--gpio-slowdown", "2",
-                "--brightness", str(self.brightness),
-                "--animations", self.screensaver_animations,
-                "--cycle-time", str(self.screensaver_cycle_time),
-                "--fade-time",  str(self.screensaver_fade_time),
-                *self._pixel_mapper(),
-            ]
-            self.screensaver_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
-        except Exception as e:
-            print(f"[agent] Screensaver start error: {e}", flush=True)
-            self.screensaver_proc = None
+        self.screensaver_proc = self._launch(
+            "screensaver", os.path.join(SCREENSAVER_DIR, "screensaver_display.py"),
+            extra_args=["--animations", self.screensaver_animations,
+                        "--cycle-time", str(self.screensaver_cycle_time),
+                        "--fade-time",  str(self.screensaver_fade_time)])
 
     def _start_stopwatch(self):
         if self._is_running(self.stopwatch_proc): return
-        try:
-            print("[agent] starting Stopwatch ...", flush=True)
-            cmd = [
-                "sudo", "-n", "/usr/bin/env",
-                f"HOME={HOME_DIR}", f"XDG_CACHE_HOME={HOME_DIR}/.cache", "PYTHONUNBUFFERED=1",
-                os.path.join(BASE, ".venv", "bin", "python"),
-                os.path.join(STOPWATCH_DIR, "stopwatch_display.py"),
-                "--hardware-mapping", "adafruit-hat-pwm",
-                "--gpio-slowdown", "2",
-                "--brightness", str(self.brightness),
-                "--start-time", str(self.stopwatch_start_time),
-                *self._pixel_mapper(),
-            ]
-            self.stopwatch_proc = subprocess.Popen(cmd, start_new_session=True, env=self._child_env())
-        except Exception as e:
-            print(f"[agent] Stopwatch start error: {e}", flush=True)
-            self.stopwatch_proc = None
+        self.stopwatch_proc = self._launch(
+            "stopwatch", os.path.join(STOPWATCH_DIR, "stopwatch_display.py"),
+            extra_args=["--start-time", str(self.stopwatch_start_time)])
 
     def _kill_all(self):
-        self.mlb_proc        = self._stop("mlb",        self.mlb_proc)
-        self.music_proc      = self._stop("music",      self.music_proc)
-        self.clock_proc      = self._stop("clock",      self.clock_proc)
-        self.weather_proc    = self._stop("weather",    self.weather_proc)
-        self.picture_proc    = self._stop("picture",    self.picture_proc)
-        self.drawing_proc    = self._stop("drawing",    self.drawing_proc)
-        self.text_proc       = self._stop("text",       self.text_proc)
-        self.map_proc        = self._stop("map",        self.map_proc)
-        self.countdown_proc  = self._stop("countdown",  self.countdown_proc)
-        self.screensaver_proc= self._stop("screensaver",self.screensaver_proc)
-        self.stopwatch_proc  = self._stop("stopwatch",  self.stopwatch_proc)
+        for attr in _ALL_PROCS:
+            setattr(self, attr, self._stop(attr.replace("_proc", ""), getattr(self, attr)))
         # Remove stale heartbeat files so the watchdog doesn't immediately
         # kill a freshly-started process because the old run left a stale file.
         for m in range(1, 13):
-            hb = heartbeat_path(m)
             try:
-                os.remove(hb)
+                os.remove(heartbeat_path(m))
             except (FileNotFoundError, PermissionError):
-                # FileNotFoundError: already gone — fine
-                # PermissionError: file was written by the root display process;
-                # we can't delete it, but with stall_s=90 the watchdog gives
-                # enough time for the new process to write its first heartbeat
-                # before we declare it stale.
                 pass
+
+    def _dispatch(self, m: int):
+        """Start the process for mode m (does NOT kill others — caller must)."""
+        if m in _MODES:
+            getattr(self, _MODES[m][1])()
 
     def apply_mode(self, m: int):
         if m == self.mode:
             return
         print(f"[agent] mode {self.mode} -> {m}", flush=True)
         self._kill_all()
-        if m == 1:   self._start_mlb()
-        elif m == 2: self._start_music()  # Live Music
-        elif m == 3: self._start_clock()
-        elif m == 4: self._start_weather()
-        elif m == 5: self._start_picture()
-        elif m == 6: self._start_drawing()
-        elif m == 7: self._start_text()
-        elif m == 8: self._start_music()  # Custom Music (uses same display, backend serves different content)
-        elif m == 9:  self._start_map()
-        elif m == 10: self._start_countdown()
-        elif m == 11: self._start_screensaver()
-        elif m == 12: self._start_stopwatch()
+        self._dispatch(m)
         self.mode = m
 
     def apply_brightness(self, b: int):
@@ -493,28 +377,17 @@ class Runner:
             return
         print(f"[agent] effective brightness {self.brightness} -> {eff}", flush=True)
         self.brightness = eff
-        if self._is_running(self.mlb_proc):
-            self.mlb_proc = self._stop("mlb", self.mlb_proc); self._start_mlb()
-        if self._is_running(self.music_proc):
-            self.music_proc = self._stop("music", self.music_proc); self._start_music()
-        if self._is_running(self.clock_proc):
-            self.clock_proc = self._stop("clock", self.clock_proc); self._start_clock()
-        if self._is_running(self.weather_proc):
-            self.weather_proc = self._stop("weather", self.weather_proc); self._start_weather()
-        if self._is_running(self.picture_proc):
-            self.picture_proc = self._stop("picture", self.picture_proc); self._start_picture()
-        if self._is_running(self.drawing_proc):
-            self.drawing_proc = self._stop("drawing", self.drawing_proc); self._start_drawing()
-        if self._is_running(self.text_proc):
-            self.text_proc = self._stop("text", self.text_proc); self._start_text()
-        if self._is_running(self.map_proc):
-            self.map_proc = self._stop("map", self.map_proc); self._start_map()
-        if self._is_running(self.countdown_proc):
-            self.countdown_proc = self._stop("countdown", self.countdown_proc); self._start_countdown()
-        if self._is_running(self.screensaver_proc):
-            self.screensaver_proc = self._stop("screensaver", self.screensaver_proc); self._start_screensaver()
-        if self._is_running(self.stopwatch_proc):
-            self.stopwatch_proc = self._stop("stopwatch", self.stopwatch_proc); self._start_stopwatch()
+        for attr in _ALL_PROCS:
+            p = getattr(self, attr)
+            if self._is_running(p):
+                name = attr.replace("_proc", "")
+                setattr(self, attr, self._stop(name, p))
+                # Find which mode uses this proc and call its start method.
+                # Use the first matching entry in _MODES (covers mode 2/8 sharing music_proc).
+                for m_entry, (m_attr, m_start) in _MODES.items():
+                    if m_attr == attr:
+                        getattr(self, m_start)()
+                        break
 
     def _force_restart(self):
         """Kill whatever is running and restart the current mode with current settings."""
@@ -522,19 +395,7 @@ class Runner:
             return
         print(f"[agent] force-restarting mode {self.mode}", flush=True)
         self._kill_all()
-        m = self.mode
-        if   m == 1: self._start_mlb()
-        elif m == 2: self._start_music()
-        elif m == 3: self._start_clock()
-        elif m == 4: self._start_weather()
-        elif m == 5: self._start_picture()
-        elif m == 6: self._start_drawing()
-        elif m == 7: self._start_text()
-        elif m == 8:  self._start_music()
-        elif m == 9:  self._start_map()
-        elif m == 10: self._start_countdown()
-        elif m == 11: self._start_screensaver()
-        elif m == 12: self._start_stopwatch()
+        self._dispatch(self.mode)
 
     def apply_rotation(self, r: int):
         r = int(r)
@@ -554,8 +415,7 @@ class Runner:
         """Apply mode based on current time. Called every 30 s."""
         if not self.schedule_enabled or not self.schedule_slots:
             return
-        import datetime as _dt
-        ct = _dt.datetime.now().strftime("%H:%M")
+        ct = datetime.datetime.now().strftime("%H:%M")
         for slot in self.schedule_slots:
             start = slot.get("start", "")
             end   = slot.get("end",   "")
@@ -577,94 +437,16 @@ class Runner:
             print(f"[schedule] no active slot → off", flush=True)
             self.apply_mode(0)
 
-def fetch_device_settings() -> dict:
-    """Fetch per-device settings (location, units, etc.) from backend."""
+def _fetch(path: str) -> dict:
+    """GET {BACKEND_BASE}{path}, return parsed JSON or {} on any failure."""
     if not BACKEND_BASE or not HEADERS:
         return {}
     try:
-        r = requests.get(f"{BACKEND_BASE}/settings", headers=HEADERS, timeout=5)
+        r = requests.get(f"{BACKEND_BASE}{path}", headers=HEADERS, timeout=5)
         if r.ok:
             return r.json()
     except Exception as e:
-        print(f"[agent] settings fetch error: {e}", flush=True)
-    return {}
-
-
-def fetch_map_config() -> dict:
-    """Fetch map addresses (address_a, address_b) from backend."""
-    if not BACKEND_BASE or not HEADERS:
-        return {}
-    try:
-        r = requests.get(f"{BACKEND_BASE}/map-config", headers=HEADERS, timeout=5)
-        if r.ok:
-            return r.json()
-    except Exception as e:
-        print(f"[agent] map config fetch error: {e}", flush=True)
-    return {}
-
-
-def fetch_timer_config() -> dict:
-    """Fetch timer end_time + duration from backend."""
-    if not BACKEND_BASE or not HEADERS:
-        return {}
-    try:
-        r = requests.get(f"{BACKEND_BASE}/timer-config", headers=HEADERS, timeout=5)
-        if r.ok:
-            return r.json()
-    except Exception as e:
-        print(f"[agent] timer config fetch error: {e}", flush=True)
-    return {}
-
-
-def fetch_brightness_config() -> dict:
-    """Fetch idle_brightness + dim schedule from backend."""
-    if not BACKEND_BASE or not HEADERS:
-        return {}
-    try:
-        r = requests.get(f"{BACKEND_BASE}/brightness-config", headers=HEADERS, timeout=5)
-        if r.ok:
-            return r.json()
-    except Exception as e:
-        print(f"[agent] brightness config fetch error: {e}", flush=True)
-    return {}
-
-
-def fetch_screensaver_config() -> dict:
-    """Fetch screensaver animations/timing from backend."""
-    if not BACKEND_BASE or not HEADERS:
-        return {}
-    try:
-        r = requests.get(f"{BACKEND_BASE}/screensaver-config", headers=HEADERS, timeout=5)
-        if r.ok:
-            return r.json()
-    except Exception as e:
-        print(f"[agent] screensaver config fetch error: {e}", flush=True)
-    return {}
-
-
-def fetch_stopwatch_config() -> dict:
-    """Fetch stopwatch start_time from backend."""
-    if not BACKEND_BASE or not HEADERS:
-        return {}
-    try:
-        r = requests.get(f"{BACKEND_BASE}/stopwatch-config", headers=HEADERS, timeout=5)
-        if r.ok:
-            return r.json()
-    except Exception as e:
-        print(f"[agent] stopwatch config fetch error: {e}", flush=True)
-    return {}
-
-
-def fetch_schedule() -> dict:
-    """Fetch schedule config from backend."""
-    if not BACKEND_BASE or not HEADERS:
-        return {}
-    try:
-        r = requests.get(f"{BACKEND_BASE}/schedule", headers=HEADERS, timeout=5)
-        if r.ok:
-            return r.json()
-    except Exception as e:
-        print(f"[agent] schedule fetch error: {e}", flush=True)
+        print(f"[agent] {path} fetch error: {e}", flush=True)
     return {}
 
 
@@ -770,30 +552,14 @@ async def schedule_loop(runner: Runner, interval: int = 30):
         await asyncio.sleep(interval)
 
 async def watchdog_loop(runner: Runner, interval=5, stall_s=90):
-    # checks: process alive AND heartbeat fresh
     while True:
         try:
             mode = runner.mode
-            hb = heartbeat_path(mode)
             stale = False
+            hb = heartbeat_path(mode)
             if os.path.exists(hb):
-                age = _now() - os.path.getmtime(hb)
-                stale = age > stall_s
-            # determine current proc
-            p = None
-            if   mode == 1: p = runner.mlb_proc
-            elif mode == 2: p = runner.music_proc
-            elif mode == 3: p = runner.clock_proc
-            elif mode == 4: p = runner.weather_proc
-            elif mode == 5: p = runner.picture_proc
-            elif mode == 6: p = runner.drawing_proc
-            elif mode == 7: p = runner.text_proc
-            elif mode == 8:  p = runner.music_proc  # Custom Music uses same process
-            elif mode == 9:  p = runner.map_proc
-            elif mode == 10: p = runner.countdown_proc
-            elif mode == 11: p = runner.screensaver_proc
-            elif mode == 12: p = runner.stopwatch_proc
-
+                stale = (_now() - os.path.getmtime(hb)) > stall_s
+            p = getattr(runner, _MODES[mode][0], None) if mode in _MODES else None
             if p is not None and not Runner._is_running(p):
                 print(f"[agent] watchdog: mode {mode} process died; restarting", flush=True)
                 runner.restart_current()
@@ -823,12 +589,14 @@ def _apply_settings(runner: Runner, settings: dict):
 async def ws_loop():
     runner = Runner()
 
+    loop = asyncio.get_event_loop()
+
     # Load device settings (location, units) before starting modes
-    settings = await asyncio.get_event_loop().run_in_executor(None, fetch_device_settings)
+    settings = await loop.run_in_executor(None, _fetch, "/settings")
     _apply_settings(runner, settings)
 
     # Load map config
-    map_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_map_config)
+    map_cfg = await loop.run_in_executor(None, _fetch, "/map-config")
     if map_cfg.get("address_a"):
         runner.map_address_a = map_cfg["address_a"].strip()
     if map_cfg.get("address_b"):
@@ -841,14 +609,14 @@ async def ws_loop():
         runner.map_submode = map_cfg["submode"]
 
     # Load timer config
-    timer_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_timer_config)
+    timer_cfg = await loop.run_in_executor(None, _fetch, "/timer-config")
     if timer_cfg.get("end_time"):
         runner.timer_end_time = float(timer_cfg["end_time"])
         runner.timer_duration = float(timer_cfg.get("duration", 0))
         print(f"[agent] timer config loaded: end_time={runner.timer_end_time}, duration={runner.timer_duration}", flush=True)
 
     # Load brightness config (idle brightness + dim schedule) — before applying state
-    bc_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_brightness_config)
+    bc_cfg = await loop.run_in_executor(None, _fetch, "/brightness-config")
     if bc_cfg:
         runner.idle_brightness        = int(bc_cfg.get("idle_brightness", 20))
         runner.dim_schedule_enabled   = bool(bc_cfg.get("dim_schedule_enabled", False))
@@ -858,7 +626,7 @@ async def ws_loop():
               f"dim_enabled={runner.dim_schedule_enabled} {runner.dim_start}→{runner.dim_end}", flush=True)
 
     # Load screensaver config
-    ss_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_screensaver_config)
+    ss_cfg = await loop.run_in_executor(None, _fetch, "/screensaver-config")
     if ss_cfg:
         if ss_cfg.get("animations"):
             runner.screensaver_animations = ss_cfg["animations"]
@@ -870,13 +638,13 @@ async def ws_loop():
               f"cycle={runner.screensaver_cycle_time}s fade={runner.screensaver_fade_time}s", flush=True)
 
     # Load stopwatch config
-    sw_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_stopwatch_config)
+    sw_cfg = await loop.run_in_executor(None, _fetch, "/stopwatch-config")
     if sw_cfg.get("start_time"):
         runner.stopwatch_start_time = float(sw_cfg["start_time"])
         print(f"[agent] stopwatch config loaded: start_time={runner.stopwatch_start_time}", flush=True)
 
     # Load schedule
-    schedule_cfg = await asyncio.get_event_loop().run_in_executor(None, fetch_schedule)
+    schedule_cfg = await loop.run_in_executor(None, _fetch, "/schedule")
     if schedule_cfg:
         runner.schedule_enabled = schedule_cfg.get("enabled", False)
         runner.schedule_slots   = schedule_cfg.get("slots", [])

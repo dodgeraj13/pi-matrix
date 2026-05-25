@@ -18,6 +18,8 @@ ENV/
 # Logs
 *.log
 output.log
+logs/
+cache/
 
 # Environment files
 .env

@@ -1,7 +1,8 @@
 import os
 from PIL import Image
 
-ICON_DIR = "/home/pi_two/mlb-led-scoreboard/assets/weather"
+_HOME = os.environ.get("HOME", "/home/pi_two")
+ICON_DIR = f"{_HOME}/mlb-led-scoreboard/assets/weather"
 
 # Exact OWM code -> filename mapping (all files exist in your folder)
 EXACT_CODE_MAP = {

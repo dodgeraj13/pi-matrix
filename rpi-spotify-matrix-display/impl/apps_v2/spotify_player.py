@@ -3,8 +3,11 @@ from PIL import Image, ImageFont, ImageDraw
 from io import BytesIO
 from datetime import datetime
 
-# Add parent directory to path for clock_utils import
-sys.path.insert(0, "/home/pi_two")
+# Derive repo root dynamically: apps_v2/ → impl/ → rpi-spotify-matrix-display/ → repo root
+_d = os.path.dirname
+_REPO_DIR = _d(_d(_d(_d(os.path.realpath(__file__)))))
+if _REPO_DIR not in sys.path:
+    sys.path.insert(0, _REPO_DIR)
 try:
     from clock_utils import (
         CLOCK_CENTER, CLOCK_RADIUS, NUM_TICKS,

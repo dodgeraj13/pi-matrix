@@ -7,3 +7,4 @@ impl/.cache
 .venv
 impl/modules/.spotify_cache
 *.spotify_token_cache
+config.ini

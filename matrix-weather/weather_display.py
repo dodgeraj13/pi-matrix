@@ -12,7 +12,8 @@ def _add_path(p: str):
     if os.path.exists(p) and p not in sys.path:
         sys.path.append(p)
 
-_add_path("/home/pi_two/rpi-spotify-matrix-display/rpi-rgb-led-matrix/bindings/python")
+_HOME = os.environ.get("HOME", "/home/pi_two")
+_add_path(f"{_HOME}/rpi-spotify-matrix-display/rpi-rgb-led-matrix/bindings/python")
 
 from rgbmatrix import RGBMatrix, RGBMatrixOptions, graphics
 
@@ -178,11 +179,11 @@ def gcol(tup): return graphics.Color(tup[0], tup[1], tup[2])
 # ---------------- fonts ----------------
 
 FONT_ROOTS = [
-    "/home/pi_two/mlb-led-scoreboard/assets/fonts/patched",
-    "/home/pi_two/mlb-led-scoreboard/assets/fonts",
-    "/home/pi_two/mlb-led-scoreboard/rpi-rgb-led-matrix/fonts",
-    "/home/pi_two/rpi-spotify-matrix-display/rpi-rgb-led-matrix/fonts",
-    "/home/pi_two/rpi-rgb-led-matrix/fonts",
+    f"{_HOME}/mlb-led-scoreboard/assets/fonts/patched",
+    f"{_HOME}/mlb-led-scoreboard/assets/fonts",
+    f"{_HOME}/mlb-led-scoreboard/rpi-rgb-led-matrix/fonts",
+    f"{_HOME}/rpi-spotify-matrix-display/rpi-rgb-led-matrix/fonts",
+    f"{_HOME}/rpi-rgb-led-matrix/fonts",
 ]
 
 # Prefer your new medium font:
@@ -237,7 +238,7 @@ def now_local_string(tz_off):
 
 # ---------------- icons ----------------
 
-ICON_DIR = "/home/pi_two/mlb-led-scoreboard/assets/weather"
+ICON_DIR = f"{_HOME}/mlb-led-scoreboard/assets/weather"
 ICON_CACHE = {}
 ICON_SIZE = 14
 

@@ -9,9 +9,8 @@ def _add_path(p: str):
     if os.path.exists(p) and p not in sys.path:
         sys.path.append(p)
 
-# Add parent directory to path for clock_utils import
-_add_path("/home/pi_two")
-_add_path("/home/pi_two/rpi-spotify-matrix-display/rpi-rgb-led-matrix/bindings/python")
+# Repo root is one level above matrix-clock/ — clock_utils.py lives there
+_add_path(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 # Import shared clock constants
 try:
@@ -33,12 +32,13 @@ except ImportError:
 
 from rgbmatrix import RGBMatrix, RGBMatrixOptions, graphics
 
+_HOME = os.environ.get("HOME", "/home/pi_two")
 FONT_ROOTS = [
-    "/home/pi_two/mlb-led-scoreboard/assets/fonts/patched",
-    "/home_pi_two/mlb-led-scoreboard/assets/fonts".replace("_",""),
-    "/home/pi_two/mlb-led-scoreboard/rpi-rgb-led-matrix/fonts",
-    "/home/pi_two/rpi-spotify-matrix-display/rpi-rgb-led-matrix/fonts",
-    "/home/pi_two/rpi-rgb-led-matrix/fonts",
+    f"{_HOME}/mlb-led-scoreboard/assets/fonts/patched",
+    f"{_HOME}/mlb-led-scoreboard/assets/fonts",
+    f"{_HOME}/mlb-led-scoreboard/rpi-rgb-led-matrix/fonts",
+    f"{_HOME}/rpi-spotify-matrix-display/rpi-rgb-led-matrix/fonts",
+    f"{_HOME}/rpi-rgb-led-matrix/fonts",
 ]
 
 # Try to import requests for backend fetching, but don't require it

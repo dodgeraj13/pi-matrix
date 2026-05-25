@@ -18,7 +18,8 @@ def _add_path(p: str):
     p = os.path.abspath(p)
     if os.path.exists(p) and p not in sys.path:
         sys.path.append(p)
-_add_path("/home/pi_two/rpi-spotify-matrix-display/rpi-rgb-led-matrix/bindings/python")
+_HOME = os.environ.get("HOME", "/home/pi_two")
+_add_path(f"{_HOME}/rpi-spotify-matrix-display/rpi-rgb-led-matrix/bindings/python")
 # ---------------------------------------------------------
 
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
