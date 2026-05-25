@@ -6,7 +6,7 @@
 # - Loops through frames at the GIF's native frame timing
 # - Heartbeat file every 30s so agent can detect we're alive
 
-import os, sys, time, argparse, gc
+import hashlib, os, sys, time, argparse, gc
 from io import BytesIO
 
 import requests
@@ -26,7 +26,8 @@ HEARTBEAT = "/tmp/matrix-heartbeat-13"
 
 _session = requests.Session()
 _cached_etag = None
-_frames: list = []  # list of (PIL.Image 64x64 RGB, duration_seconds)
+_cached_hash = None   # MD5 of last downloaded GIF bytes — avoids re-parsing unchanged content
+_frames: list = []   # list of (PIL.Image 64x64 RGB, duration_seconds)
 
 def parse_args():
     ap = argparse.ArgumentParser(prog="MatrixGIF")
@@ -50,7 +51,7 @@ def _scale_to_64(img):
     return canvas
 
 def fetch_if_changed(api_base, device_token=""):
-    global _cached_etag, _frames
+    global _cached_etag, _cached_hash, _frames
     try:
         headers = {"Accept": "image/gif"}
         if device_token:
@@ -70,16 +71,29 @@ def fetch_if_changed(api_base, device_token=""):
         data = r.content
         r.close()
 
+        # Skip re-parsing if content hasn't changed (backend may not send ETags)
+        content_hash = hashlib.md5(data).hexdigest()
+        if content_hash == _cached_hash and _frames:
+            return
+
         gif = Image.open(BytesIO(data))
         new_frames = []
         try:
+            # Composite frames onto a canvas so delta/additive GIFs animate correctly.
+            # PIL's seek() gives you only the changed pixels per frame, not a full frame.
+            # Alpha-compositing accumulates changes, producing the correct visible frame.
+            canvas = Image.new("RGBA", gif.size, (0, 0, 0, 255))
             i = 0
             while True:
                 gif.seek(i)
-                # GIF frame duration in ms (default 100ms if missing)
                 duration_ms = gif.info.get("duration", 100)
-                frame = _scale_to_64(gif.convert("RGB"))
-                new_frames.append((frame, max(0.02, duration_ms / 1000.0)))
+                frame_rgba = gif.copy().convert("RGBA")
+                new_canvas = Image.alpha_composite(canvas, frame_rgba)
+                new_frames.append((_scale_to_64(new_canvas.convert("RGB")),
+                                   max(0.02, duration_ms / 1000.0)))
+                # disposal_method 2 = restore to background before next frame
+                disposal = getattr(gif, "disposal_method", 1)
+                canvas = Image.new("RGBA", gif.size, (0, 0, 0, 255)) if disposal == 2 else new_canvas
                 i += 1
         except EOFError:
             pass
@@ -87,7 +101,9 @@ def fetch_if_changed(api_base, device_token=""):
         if new_frames:
             _frames = new_frames
             _cached_etag = etag
-            print(f"[gif] loaded {len(_frames)} frames", flush=True)
+            _cached_hash = content_hash
+            dur0 = new_frames[0][1]
+            print(f"[gif] loaded {len(_frames)} frames (frame duration: {dur0*1000:.0f}ms)", flush=True)
     except Exception as e:
         print(f"[gif] fetch error: {e}", flush=True)
 
