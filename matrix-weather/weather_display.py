@@ -372,22 +372,30 @@ def _draw_raindrop(canvas, cx, cy):
             _px(canvas, cx + dx, cy + dy, *col)
 
 
+def _draw_sun_dot(canvas, cx, cy):
+    """Minimal 3×3 sun dot for small icons — no rays."""
+    col = (255, 210, 0)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            _px(canvas, cx + dx, cy + dy, *col)
+
+
 # ── Layout constants ───────────────────────────────────────────────────────────
 #
 #  y= 1-16  : 16×16 icon, centered at x=24
 #  y=18-33  : current temp  9x15B (baseline=33, ~15px ascent)
 #  y=35-43  : L/H temps     5x8   (baseline=43, ~8px ascent)
 #  y=45     : separator
-#  y=47-52  : sunrise | sunset   4x6 (baseline=52); icons at cy=49
-#  y=56-61  : humidity | time    4x6 (baseline=61); drop at cy=58
+#  y=47-50  : sunrise | sunset   4x6 (baseline=50); icons at cy=47
+#  y=53-61  : humidity | time    5x8 (baseline=61); drop at cy=57
 #
 _Y_ICON_TOP   = 1
 _X_ICON_LEFT  = 24   # (64 - 16) // 2
 _Y_TEMP_BL    = 33   # 9x15B baseline
 _Y_LH_BL      = 43   # 5x8 baseline
 _Y_SEP        = 45
-_Y_SUNMOON_BL = 52   # 4x6 baseline – sunrise/sunset row
-_Y_BOT_BL     = 61   # 4x6 baseline – humidity/time row
+_Y_SUNMOON_BL = 50   # 4x6 baseline – sunrise/sunset row (pushed up)
+_Y_BOT_BL     = 61   # 5x8 baseline – humidity/time row
 
 
 def draw_frame(canvas, wdata, now_ts=None):
@@ -443,12 +451,12 @@ def draw_frame(canvas, wdata, now_ts=None):
     _hline(canvas, 0, 63, _Y_SEP, 40, 40, 40)
 
     # ── Sunrise / Sunset row (4x6, ~4px per char) ────────────────────────────
-    sr_txt  = fmt_hhmm(sunrise, tz_off)
-    ss_txt  = fmt_hhmm(sunset,  tz_off)
+    sr_txt   = fmt_hhmm(sunrise, tz_off)
+    ss_txt   = fmt_hhmm(sunset,  tz_off)
     icon_cy1 = _Y_SUNMOON_BL - 3   # icon center for this row
 
-    # Left: tiny sun + sunrise time
-    _draw_sun(canvas, 3, icon_cy1, r=2)
+    # Left: tiny sun dot + sunrise time
+    _draw_sun_dot(canvas, 3, icon_cy1)
     graphics.DrawText(canvas, _F_SMALL, 8, _Y_SUNMOON_BL,
                       graphics.Color(240, 220, 120), sr_txt)
 
@@ -458,19 +466,19 @@ def draw_frame(canvas, wdata, now_ts=None):
     graphics.DrawText(canvas, _F_SMALL, x_ss, _Y_SUNMOON_BL,
                       graphics.Color(200, 190, 255), ss_txt)
 
-    # ── Humidity / Current time row (4x6) ────────────────────────────────────
+    # ── Humidity / Current time row (5x8, ~5px per char) ─────────────────────
     hum_txt  = f"{int(humid)}%" if humid is not None else "--%"
     time_txt = fmt_current_time(tz_off)
-    icon_cy2 = _Y_BOT_BL - 3   # icon center for this row
+    icon_cy2 = _Y_BOT_BL - 4   # icon center for this row
 
     # Left: tiny raindrop + humidity
     _draw_raindrop(canvas, 3, icon_cy2)
-    graphics.DrawText(canvas, _F_SMALL, 8, _Y_BOT_BL,
+    graphics.DrawText(canvas, _F_MED, 8, _Y_BOT_BL,
                       graphics.Color(100, 185, 255), hum_txt)
 
-    # Right: current time (right-aligned)
-    x_time = 63 - len(time_txt) * 4
-    graphics.DrawText(canvas, _F_SMALL, x_time, _Y_BOT_BL,
+    # Right: current time (right-aligned, 5x8)
+    x_time = 63 - len(time_txt) * 5
+    graphics.DrawText(canvas, _F_MED, x_time, _Y_BOT_BL,
                       graphics.Color(160, 165, 185), time_txt)
 
 
