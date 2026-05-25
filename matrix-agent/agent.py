@@ -513,23 +513,44 @@ def fetch_and_write_mlb_config(runner: "Runner | None" = None):
 
 
 def _do_update():
-    """Pull latest code from git and reboot if anything changed."""
+    """Force-sync to origin/main and reboot if anything changed."""
     try:
         repo_dir = str(BASE.parent)
         print(f"[agent] checking for updates in {repo_dir}", flush=True)
-        result = subprocess.run(
-            ["git", "-C", repo_dir, "pull"],
+
+        # Get current HEAD before updating
+        before = subprocess.run(
+            ["git", "-C", repo_dir, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10
+        ).stdout.strip()
+
+        # Fetch latest from remote
+        fetch = subprocess.run(
+            ["git", "-C", repo_dir, "fetch", "origin"],
             capture_output=True, text=True, timeout=60
         )
-        output = result.stdout.strip()
-        print(f"[agent] git pull: {output}", flush=True)
-        if result.returncode != 0:
-            print(f"[agent] git pull failed: {result.stderr.strip()}", flush=True)
+        if fetch.returncode != 0:
+            print(f"[agent] git fetch failed: {fetch.stderr.strip()}", flush=True)
             return
-        if "Already up to date." in output:
+
+        # Hard-reset to origin/main (never fails due to divergent branches)
+        reset = subprocess.run(
+            ["git", "-C", repo_dir, "reset", "--hard", "origin/main"],
+            capture_output=True, text=True, timeout=30
+        )
+        if reset.returncode != 0:
+            print(f"[agent] git reset failed: {reset.stderr.strip()}", flush=True)
+            return
+
+        after = subprocess.run(
+            ["git", "-C", repo_dir, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10
+        ).stdout.strip()
+
+        if before == after:
             print("[agent] already up to date — no reboot needed", flush=True)
         else:
-            print("[agent] changes pulled — rebooting in 3 seconds...", flush=True)
+            print(f"[agent] updated {before[:7]} → {after[:7]} — rebooting in 3 seconds...", flush=True)
             time.sleep(3)
             subprocess.run(["sudo", "reboot"], check=False)
     except Exception as e:
