@@ -383,19 +383,19 @@ def _draw_sun_dot(canvas, cx, cy):
 # ── Layout constants ───────────────────────────────────────────────────────────
 #
 #  y= 1-16  : 16×16 icon, centered at x=24
-#  y=18-33  : current temp  9x15B (baseline=33, ~15px ascent)
-#  y=35-43  : L/H temps     5x8   (baseline=43, ~8px ascent)
-#  y=45     : separator
-#  y=47-50  : sunrise | sunset   4x6 (baseline=50); icons at cy=47
-#  y=53-61  : humidity | time    5x8 (baseline=61); drop at cy=57
+#  y=18-31  : current temp  9x15B (baseline=31, ~13px ascent)
+#  y=33-41  : L/H temps     5x8   (baseline=41, ~8px ascent)
+#  y=43     : separator
+#  y=48-53  : sunrise | sunset   4x6 (baseline=53); icons at cy=50
+#  y=56-62  : humidity | time    5x8 (baseline=62); drop at cy=58
 #
 _Y_ICON_TOP   = 1
 _X_ICON_LEFT  = 24   # (64 - 16) // 2
-_Y_TEMP_BL    = 33   # 9x15B baseline
-_Y_LH_BL      = 43   # 5x8 baseline
-_Y_SEP        = 45
-_Y_SUNMOON_BL = 50   # 4x6 baseline – sunrise/sunset row (pushed up)
-_Y_BOT_BL     = 61   # 5x8 baseline – humidity/time row
+_Y_TEMP_BL    = 31   # 9x15B baseline  (moved up 2px)
+_Y_LH_BL      = 41   # 5x8 baseline    (moved up 2px)
+_Y_SEP        = 43   # separator       (moved up 2px)
+_Y_SUNMOON_BL = 53   # 4x6 baseline – sunrise/sunset row (4px clear of sep)
+_Y_BOT_BL     = 62   # 5x8 baseline – humidity/time row
 
 
 def draw_frame(canvas, wdata, now_ts=None):
