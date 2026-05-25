@@ -3,17 +3,23 @@
 """
 Weather display – 64x64 RGB LED matrix (Mode 4).
 
-Layout (PIL-rendered):
-  [ 16×16 icon ]  Condition text
-  Large current temperature (color-graded)
-  L: 58°                   H: 85°
-  ─────────────────────────────────
-  ☀ 6:32       💧 65%       8:15 ☽
+Rendering:
+  · Text          → rgbmatrix.graphics BDF bitmap fonts (crisp, pixel-perfect)
+  · Weather icon  → PNG asset loaded via PIL, blitted pixel-by-pixel
+  · Sun/Moon/Drop → drawn directly on canvas via SetPixel
+
+Layout (64×64):
+  y= 1-16  : 16×16 weather icon, centered
+  y=18-33  : Current temperature (9x15B, large, color-graded)
+  y=35-43  : L:XX°   H:XX°  (5x8)
+  y=45     : separator line
+  y=47-52  : ☀ 6:32          7:45 ☽  (4x6)
+  y=56-61  : 💧 65%              6:32  (4x6, humidity + current time)
 """
 
 import os, sys, time, math, argparse, configparser, inspect, requests, gc
 from datetime import datetime, timezone, timedelta
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 def _add_path(p: str):
     p = os.path.abspath(p)
@@ -23,11 +29,36 @@ def _add_path(p: str):
 _HOME = os.environ.get("HOME", "/home/pi_two")
 _add_path(f"{_HOME}/rpi-spotify-matrix-display/rpi-rgb-led-matrix/bindings/python")
 
-from rgbmatrix import RGBMatrix, RGBMatrixOptions
+from rgbmatrix import RGBMatrix, RGBMatrixOptions, graphics
 
 HEARTBEAT = "/tmp/matrix-heartbeat-4"
 
-# ── Args / config ─────────────────────────────────────────────────────────────
+# ── BDF fonts ──────────────────────────────────────────────────────────────────
+_FONT_DIR = f"{_HOME}/rpi-spotify-matrix-display/rpi-rgb-led-matrix/fonts"
+
+_F_LARGE = None   # 9x15B – current temperature
+_F_MED   = None   # 5x8   – L/H temps
+_F_SMALL = None   # 4x6   – bottom bar (sunrise/sunset/humidity/time)
+
+
+def _load_bdf(name):
+    f = graphics.Font()
+    p = os.path.join(_FONT_DIR, name)
+    if os.path.exists(p):
+        f.LoadFont(p)
+    else:
+        print(f"[weather] font not found: {p}", flush=True)
+    return f
+
+
+def _init_fonts():
+    global _F_LARGE, _F_MED, _F_SMALL
+    _F_LARGE = _load_bdf("9x15B.bdf")
+    _F_MED   = _load_bdf("5x8.bdf")
+    _F_SMALL = _load_bdf("4x6.bdf")
+
+
+# ── Args / config ──────────────────────────────────────────────────────────────
 
 def parse_args():
     ap = argparse.ArgumentParser(prog="MatrixWeatherDisplay")
@@ -37,6 +68,7 @@ def parse_args():
     ap.add_argument("--gpio-slowdown",    type=int, default=2)
     ap.add_argument("--update-interval",  type=int, default=180)
     return ap.parse_args()
+
 
 def load_config():
     cfg = configparser.ConfigParser()
@@ -52,9 +84,11 @@ def load_config():
         "provider": os.getenv("WEATHER_PROVIDER") or section.get("provider", "openweathermap"),
     }
 
+
 def _is_numberlike(s):
     try: float(s); return True
     except: return False
+
 
 def parse_location(loc):
     loc = (loc or "").strip()
@@ -65,7 +99,8 @@ def parse_location(loc):
         return {"q": loc}
     return {"q": loc}
 
-# ── Weather fetch ─────────────────────────────────────────────────────────────
+
+# ── Weather fetch ──────────────────────────────────────────────────────────────
 
 def get_coords_for_location(api_key, location, units):
     params = {"appid": api_key, "units": units}
@@ -77,6 +112,7 @@ def get_coords_for_location(api_key, location, units):
     coord = data.get("coord") or {}
     return (coord.get("lat"), coord.get("lon")), data.get("timezone"), data
 
+
 def ow_onecall_try(api_key, lat, lon, units):
     r = requests.get("https://api.openweathermap.org/data/2.5/onecall",
                      params={"appid": api_key, "lat": lat, "lon": lon,
@@ -84,6 +120,7 @@ def ow_onecall_try(api_key, lat, lon, units):
                      timeout=8)
     r.raise_for_status()
     return r.json()
+
 
 def normalize_from_onecall(one, units):
     current = one.get("current", {})
@@ -93,9 +130,9 @@ def normalize_from_onecall(one, units):
     icon    = wlist[0].get("icon", "")
     desc    = wlist[0].get("description", "") or wlist[0].get("main", "")
     return {
-        "temp":     current.get("temp"),
-        "tmin":     (daily0.get("temp") or {}).get("min"),
-        "tmax":     (daily0.get("temp") or {}).get("max"),
+        "temp":      current.get("temp"),
+        "tmin":      (daily0.get("temp") or {}).get("min"),
+        "tmax":      (daily0.get("temp") or {}).get("max"),
         "condition": (desc or "").title(),
         "icon":      icon,
         "sunrise":   daily0.get("sunrise", current.get("sunrise")),
@@ -105,14 +142,15 @@ def normalize_from_onecall(one, units):
         "units":     units,
     }
 
+
 def normalize_from_current(data, units, tz_off_guess=None):
     main = data.get("main", {})
     sysb = data.get("sys", {})
     w    = (data.get("weather") or [{}])[0]
     return {
-        "temp":     main.get("temp"),
-        "tmin":     main.get("temp_min"),
-        "tmax":     main.get("temp_max"),
+        "temp":      main.get("temp"),
+        "tmin":      main.get("temp_min"),
+        "tmax":      main.get("temp_max"),
         "condition": (w.get("description") or w.get("main") or "").title(),
         "icon":      w.get("icon", ""),
         "sunrise":   sysb.get("sunrise"),
@@ -121,6 +159,7 @@ def normalize_from_current(data, units, tz_off_guess=None):
         "tz_offset": int(tz_off_guess or 0),
         "units":     units,
     }
+
 
 def fetch_weather(cfg):
     api_key = cfg["api_key"]
@@ -144,7 +183,8 @@ def fetch_weather(cfg):
             pass
     return normalize_from_current(cur_data, units, tz_off_guess=tz_off)
 
-# ── Temperature utilities ─────────────────────────────────────────────────────
+
+# ── Temperature utilities ──────────────────────────────────────────────────────
 
 def normalize_temp_value(v, units):
     if v is None: return None
@@ -153,13 +193,17 @@ def normalize_temp_value(v, units):
     u = (units or "").lower()
     if u.startswith("imp") or u.startswith("met"):
         return v
-    return v - 273.15   # Kelvin fallback
+    return v - 273.15
+
 
 def lerp(a, b, t): return a + (b - a) * t
+
+
 def lerp_rgb(c1, c2, t):
     return (int(lerp(c1[0], c2[0], t)),
             int(lerp(c1[1], c2[1], t)),
             int(lerp(c1[2], c2[2], t)))
+
 
 def temp_color(temp, units):
     if temp is None: return (220, 230, 255)
@@ -170,13 +214,14 @@ def temp_color(temp, units):
     c1, c2, c3 = (80, 160, 255), (255, 210, 0), (255, 80, 60)
     if temp <= lo:  return c1
     if temp >= hi:  return c3
-    if temp <= mid:
-        return lerp_rgb(c1, c2, (temp - lo) / (mid - lo))
+    if temp <= mid: return lerp_rgb(c1, c2, (temp - lo) / (mid - lo))
     return lerp_rgb(c2, c3, (temp - mid) / (hi - mid))
 
-# ── Time formatting ───────────────────────────────────────────────────────────
+
+# ── Time formatting ────────────────────────────────────────────────────────────
 
 def fmt_hhmm(ts, tz_off):
+    """Format a UTC timestamp as local H:MM."""
     if not ts: return "--:--"
     try:
         dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
@@ -187,74 +232,23 @@ def fmt_hhmm(ts, tz_off):
     except Exception:
         return "--:--"
 
-# ── PIL fonts ─────────────────────────────────────────────────────────────────
 
-_TTF_CANDIDATES = [
-    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-]
+def fmt_current_time(tz_off):
+    """Format the current local time as H:MM."""
+    try:
+        dt = datetime.now(tz=timezone.utc) + timedelta(seconds=int(tz_off or 0))
+        s = dt.strftime("%I:%M")
+        return s.lstrip("0") or "0:00"
+    except Exception:
+        return "--:--"
 
-def _load_ttf(size):
-    for p in _TTF_CANDIDATES:
-        if os.path.exists(p):
-            try: return ImageFont.truetype(p, size)
-            except: pass
-    return ImageFont.load_default()
 
-_F_TEMP  = None   # large current temp
-_F_MED   = None   # lo/hi temps
-_F_SMALL = None   # condition, sunrise/sunset/humidity
-
-def _init_fonts():
-    global _F_TEMP, _F_MED, _F_SMALL
-    _F_TEMP  = _load_ttf(15)
-    _F_MED   = _load_ttf(9)
-    _F_SMALL = _load_ttf(7)
-
-def _tsz(draw, text, font):
-    bb = draw.textbbox((0, 0), text, font=font)
-    return bb[2] - bb[0], bb[3] - bb[1]
-
-def _cx(draw, text, font, W=64):
-    w, _ = _tsz(draw, text, font)
-    return max(0, (W - w) // 2)
-
-# ── Drawn symbols ─────────────────────────────────────────────────────────────
-
-def draw_sun(draw, cx, cy, r=4):
-    """Small sun: yellow filled circle + 8 short rays."""
-    col = (255, 210, 0)
-    draw.ellipse([cx - r + 1, cy - r + 1, cx + r - 1, cy + r - 1], fill=col)
-    for deg in range(0, 360, 45):
-        rad = math.radians(deg)
-        x1 = cx + int(r * math.cos(rad))
-        y1 = cy + int(r * math.sin(rad))
-        x2 = cx + int((r + 2) * math.cos(rad))
-        y2 = cy + int((r + 2) * math.sin(rad))
-        draw.line([x1, y1, x2, y2], fill=col, width=1)
-
-def draw_crescent(draw, cx, cy, r=4):
-    """Clean crescent moon: outer disk minus offset cutout."""
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(200, 215, 255))
-    cut_r = max(1, int(r * 0.82))
-    cut_x = cx + int(r * 0.55)
-    cut_y = cy - int(r * 0.25)
-    draw.ellipse([cut_x - cut_r, cut_y - cut_r,
-                  cut_x + cut_r, cut_y + cut_r], fill=(0, 0, 0))
-
-def draw_raindrop(draw, cx, cy):
-    """Tiny water drop (5×7 px)."""
-    col = (80, 160, 255)
-    draw.ellipse([cx - 2, cy, cx + 2, cy + 4], fill=col)
-    draw.polygon([(cx, cy - 3), (cx - 2, cy + 1), (cx + 2, cy + 1)], fill=col)
-
-# ── Weather icon (MLB scoreboard PNG assets, tinted) ─────────────────────────
+# ── Weather icon (PNG asset, tinted) ──────────────────────────────────────────
 
 ICON_DIR   = f"{_HOME}/mlb-led-scoreboard/assets/weather"
 ICON_SIZE  = 16
 ICON_CACHE: dict = {}
+
 
 def _icon_path(code):
     code = (code or "").strip()
@@ -265,6 +259,7 @@ def _icon_path(code):
         if os.path.exists(p): return p
     p = os.path.join(ICON_DIR, "01d.png")
     return p if os.path.exists(p) else None
+
 
 def _tint_for_code(code):
     head  = (code or "")[:2]
@@ -281,6 +276,7 @@ def _tint_for_code(code):
     if night:
         base = tuple(int(c * 0.75) for c in base)
     return base
+
 
 def _load_icon(code):
     key = code or "default"
@@ -301,134 +297,184 @@ def _load_icon(code):
                 if a > 16:
                     px[xx, yy] = (tr, tg, tb, a)
         ICON_CACHE[key] = raw
-        print(f"[weather] icon loaded: {code} → {os.path.basename(p)}", flush=True)
+        print(f"[weather] icon loaded: {code}", flush=True)
         return raw
     except Exception as e:
         print(f"[weather] icon load error {code}: {e}", flush=True)
         ICON_CACHE[key] = None
         return None
 
-# ── Rendering ─────────────────────────────────────────────────────────────────
 
-def _fit_condition(draw, text, max_w):
-    """Split condition text into (line1, line2) each fitting max_w px at _F_SMALL."""
-    words = (text or "").split()
-    line1, line2 = "", ""
-    for word in words:
-        candidate = (line1 + " " + word).strip()
-        if _tsz(draw, candidate, _F_SMALL)[0] <= max_w:
-            line1 = candidate
-        else:
-            candidate2 = (line2 + " " + word).strip()
-            if _tsz(draw, candidate2, _F_SMALL)[0] <= max_w:
-                line2 = candidate2
-            # else: word dropped (extremely long strings)
-    return line1, line2
+# ── Pixel drawing helpers ──────────────────────────────────────────────────────
+
+def _px(canvas, x, y, r, g, b):
+    if 0 <= x < 64 and 0 <= y < 64:
+        canvas.SetPixel(x, y, r, g, b)
 
 
-def draw_frame(wdata):
-    """Return a 64×64 RGB PIL Image for the given weather data."""
-    W, H = 64, 64
-    img  = Image.new("RGB", (W, H), (0, 0, 0))
-    draw = ImageDraw.Draw(img)
+def _hline(canvas, x0, x1, y, r, g, b):
+    for x in range(x0, x1 + 1):
+        _px(canvas, x, y, r, g, b)
 
-    units    = wdata.get("units", "imperial")
-    cur_raw  = wdata.get("temp")
-    tmin_raw = wdata.get("tmin")
-    tmax_raw = wdata.get("tmax")
-    icon_cd  = wdata.get("icon", "01d")
-    sunrise  = wdata.get("sunrise")
-    sunset   = wdata.get("sunset")
-    tz_off   = wdata.get("tz_offset") or 0
-    humid    = wdata.get("humidity")
-    cond     = wdata.get("condition", "")
 
-    cur  = normalize_temp_value(cur_raw,  units)
-    tmin = normalize_temp_value(tmin_raw, units)
-    tmax = normalize_temp_value(tmax_raw, units)
+def _blit_icon(canvas, pil_rgba, ox, oy):
+    """Blit a tinted RGBA PIL image onto the canvas pixel-by-pixel."""
+    px = pil_rgba.load()
+    w, h = pil_rgba.size
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = px[x, y]
+            if a > 16:
+                _px(canvas, ox + x, oy + y, r, g, b)
 
-    # ── Top section: icon + condition ────────────────────────────────────────
+
+def _draw_sun(canvas, cx, cy, r=4):
+    """Filled circle + 8 short rays."""
+    col = (255, 210, 0)
+    cr  = max(1, r - 1)
+    for dy in range(-cr, cr + 1):
+        for dx in range(-cr, cr + 1):
+            if dx * dx + dy * dy <= cr * cr:
+                _px(canvas, cx + dx, cy + dy, *col)
+    for deg in range(0, 360, 45):
+        rad = math.radians(deg)
+        x1 = cx + int(round(r * math.cos(rad)))
+        y1 = cy + int(round(r * math.sin(rad)))
+        x2 = cx + int(round((r + 2) * math.cos(rad)))
+        y2 = cy + int(round((r + 2) * math.sin(rad)))
+        steps = max(abs(x2 - x1), abs(y2 - y1), 1)
+        for s in range(steps + 1):
+            t = s / steps
+            _px(canvas, int(x1 + t * (x2 - x1)), int(y1 + t * (y2 - y1)), *col)
+
+
+def _draw_crescent(canvas, cx, cy, r=4):
+    """Crescent moon via disk-minus-offset-disk pixel op."""
+    cut_r  = max(1, int(r * 0.80))
+    cut_cx = cx + int(r * 0.55)
+    cut_cy = cy - int(r * 0.15)
+    col = (200, 215, 255)
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if dx * dx + dy * dy <= r * r:
+                ddx = (cx + dx) - cut_cx
+                ddy = (cy + dy) - cut_cy
+                if ddx * ddx + ddy * ddy > cut_r * cut_r:
+                    _px(canvas, cx + dx, cy + dy, *col)
+
+
+def _draw_raindrop(canvas, cx, cy):
+    """Tiny 3×5 raindrop."""
+    col = (80, 160, 255)
+    for dy, row in [(-2, (0,)), (-1, (-1, 0, 1)), (0, (-1, 0, 1)),
+                    (1, (-1, 0, 1)), (2, (0,))]:
+        for dx in row:
+            _px(canvas, cx + dx, cy + dy, *col)
+
+
+# ── Layout constants ───────────────────────────────────────────────────────────
+#
+#  y= 1-16  : 16×16 icon, centered at x=24
+#  y=18-33  : current temp  9x15B (baseline=33, ~15px ascent)
+#  y=35-43  : L/H temps     5x8   (baseline=43, ~8px ascent)
+#  y=45     : separator
+#  y=47-52  : sunrise | sunset   4x6 (baseline=52); icons at cy=49
+#  y=56-61  : humidity | time    4x6 (baseline=61); drop at cy=58
+#
+_Y_ICON_TOP   = 1
+_X_ICON_LEFT  = 24   # (64 - 16) // 2
+_Y_TEMP_BL    = 33   # 9x15B baseline
+_Y_LH_BL      = 43   # 5x8 baseline
+_Y_SEP        = 45
+_Y_SUNMOON_BL = 52   # 4x6 baseline – sunrise/sunset row
+_Y_BOT_BL     = 61   # 4x6 baseline – humidity/time row
+
+
+def draw_frame(canvas, wdata, now_ts=None):
+    """Draw all weather elements directly onto a matrix FrameCanvas."""
+    canvas.Clear()
+
+    units   = wdata.get("units", "imperial")
+    cur_raw = wdata.get("temp")
+    tmin_r  = wdata.get("tmin")
+    tmax_r  = wdata.get("tmax")
+    icon_cd = wdata.get("icon", "01d")
+    sunrise = wdata.get("sunrise")
+    sunset  = wdata.get("sunset")
+    tz_off  = wdata.get("tz_offset") or 0
+    humid   = wdata.get("humidity")
+
+    cur  = normalize_temp_value(cur_raw, units)
+    tmin = normalize_temp_value(tmin_r,  units)
+    tmax = normalize_temp_value(tmax_r,  units)
+
+    # ── Weather icon ──────────────────────────────────────────────────────────
     icon_img = _load_icon(icon_cd)
     if icon_img:
-        img.paste(icon_img, (1, 1), icon_img)
+        _blit_icon(canvas, icon_img, _X_ICON_LEFT, _Y_ICON_TOP)
     else:
-        # fallback drawn sun (or moon if night code)
         is_night = len(icon_cd or "") >= 3 and icon_cd[2] == "n"
         if is_night:
-            draw_crescent(draw, 9, 9, r=6)
+            _draw_crescent(canvas, 32, 9, r=6)
         else:
-            draw_sun(draw, 9, 9, r=5)
+            _draw_sun(canvas, 32, 9, r=6)
 
-    # Condition text: right of icon
-    x_cond  = 1 + ICON_SIZE + 3   # x=20
-    avail_w = W - x_cond - 1      # ~43 px
-    l1, l2  = _fit_condition(draw, cond, avail_w)
-    cond_col = (175, 190, 215)
-    if l2:
-        draw.text((x_cond, 2),  l1, font=_F_SMALL, fill=cond_col)
-        draw.text((x_cond, 10), l2, font=_F_SMALL, fill=cond_col)
-    else:
-        # vertically center single line in icon height
-        _, th = _tsz(draw, l1, _F_SMALL)
-        y_l1 = 1 + (ICON_SIZE - th) // 2
-        draw.text((x_cond, y_l1), l1, font=_F_SMALL, fill=cond_col)
+    # ── Current temperature (large, color-graded) ─────────────────────────────
+    t_cur = "--" if cur is None else f"{int(round(cur))}\xb0"
+    cr, cg, cb = temp_color(cur, units)
+    col_cur = graphics.Color(cr, cg, cb)
+    # 9x15B: ~9px per char; center in 64px
+    tw    = len(t_cur) * 9
+    x_cur = max(0, (64 - tw) // 2)
+    graphics.DrawText(canvas, _F_LARGE, x_cur, _Y_TEMP_BL, col_cur, t_cur)
 
-    # ── Current temperature (large, color-graded) ────────────────────────────
-    y_temp = 19
-    t_cu   = "--" if cur  is None else f"{int(round(cur))}°"
-    col_cu = temp_color(cur, units)
-    draw.text((_cx(draw, t_cu, _F_TEMP), y_temp), t_cu, font=_F_TEMP, fill=col_cu)
+    # ── Low / High (5x8, ~5px per char) ──────────────────────────────────────
+    t_lo = "--" if tmin is None else f"L:{int(round(tmin))}\xb0"
+    t_hi = "--" if tmax is None else f"H:{int(round(tmax))}\xb0"
+    cr_lo, cg_lo, cb_lo = temp_color(tmin, units)
+    cr_hi, cg_hi, cb_hi = temp_color(tmax, units)
+    graphics.DrawText(canvas, _F_MED, 1, _Y_LH_BL,
+                      graphics.Color(cr_lo, cg_lo, cb_lo), t_lo)
+    x_hi = 63 - len(t_hi) * 5
+    graphics.DrawText(canvas, _F_MED, x_hi, _Y_LH_BL,
+                      graphics.Color(cr_hi, cg_hi, cb_hi), t_hi)
 
-    # ── Low / High (flanking, small, colored) ────────────────────────────────
-    _, th_temp = _tsz(draw, t_cu, _F_TEMP)
-    y_lh  = y_temp + th_temp + 1
-    t_lo  = "--" if tmin is None else f"L:{int(round(tmin))}°"
-    t_hi  = "--" if tmax is None else f"H:{int(round(tmax))}°"
-    col_lo = temp_color(tmin, units)
-    col_hi = temp_color(tmax, units)
-    draw.text((2, y_lh), t_lo, font=_F_MED, fill=col_lo)
-    w_hi, _ = _tsz(draw, t_hi, _F_MED)
-    draw.text((W - 2 - w_hi, y_lh), t_hi, font=_F_MED, fill=col_hi)
+    # ── Separator ─────────────────────────────────────────────────────────────
+    _hline(canvas, 0, 63, _Y_SEP, 40, 40, 40)
 
-    # ── Separator ────────────────────────────────────────────────────────────
-    _, th_lh = _tsz(draw, t_lo, _F_MED)
-    y_sep = y_lh + th_lh + 2
-    draw.line([(0, y_sep), (W - 1, y_sep)], fill=(40, 40, 40))
-
-    # ── Bottom bar: sunrise | humidity | sunset ───────────────────────────────
-    # Three equal thirds of the 64px width (~21px each).
-    y_bot  = y_sep + 3
-    icon_r = 3                      # radius for tiny sun/moon
-    icon_cy = y_bot + icon_r + 1    # vertical center for icons
-
+    # ── Sunrise / Sunset row (4x6, ~4px per char) ────────────────────────────
     sr_txt  = fmt_hhmm(sunrise, tz_off)
     ss_txt  = fmt_hhmm(sunset,  tz_off)
-    hum_txt = f"{int(humid)}%" if humid is not None else "--%"
+    icon_cy1 = _Y_SUNMOON_BL - 3   # icon center for this row
 
-    third = W // 3   # 21
+    # Left: tiny sun + sunrise time
+    _draw_sun(canvas, 3, icon_cy1, r=2)
+    graphics.DrawText(canvas, _F_SMALL, 8, _Y_SUNMOON_BL,
+                      graphics.Color(240, 220, 120), sr_txt)
 
-    # — Sunrise (left third) —
-    sun_cx = 1 + icon_r
-    draw_sun(draw, sun_cx, icon_cy, r=icon_r)
-    draw.text((sun_cx + icon_r + 2, y_bot), sr_txt,
-              font=_F_SMALL, fill=(240, 220, 120))
+    # Right: sunset time + tiny crescent
+    _draw_crescent(canvas, 61, icon_cy1, r=2)
+    x_ss = 58 - len(ss_txt) * 4
+    graphics.DrawText(canvas, _F_SMALL, x_ss, _Y_SUNMOON_BL,
+                      graphics.Color(200, 190, 255), ss_txt)
 
-    # — Humidity (middle third) —
-    drop_cx = third + 2
-    draw_raindrop(draw, drop_cx, icon_cy - 2)
-    draw.text((drop_cx + 5, y_bot), hum_txt,
-              font=_F_SMALL, fill=(100, 185, 255))
+    # ── Humidity / Current time row (4x6) ────────────────────────────────────
+    hum_txt  = f"{int(humid)}%" if humid is not None else "--%"
+    time_txt = fmt_current_time(tz_off)
+    icon_cy2 = _Y_BOT_BL - 3   # icon center for this row
 
-    # — Sunset (right third) —
-    w_ss, _ = _tsz(draw, ss_txt, _F_SMALL)
-    moon_cx = W - 1 - icon_r
-    ss_x    = moon_cx - icon_r - 2 - w_ss
-    draw.text((ss_x, y_bot), ss_txt, font=_F_SMALL, fill=(200, 190, 255))
-    draw_crescent(draw, moon_cx, icon_cy, r=icon_r)
+    # Left: tiny raindrop + humidity
+    _draw_raindrop(canvas, 3, icon_cy2)
+    graphics.DrawText(canvas, _F_SMALL, 8, _Y_BOT_BL,
+                      graphics.Color(100, 185, 255), hum_txt)
 
-    return img
+    # Right: current time (right-aligned)
+    x_time = 63 - len(time_txt) * 4
+    graphics.DrawText(canvas, _F_SMALL, x_time, _Y_BOT_BL,
+                      graphics.Color(160, 165, 185), time_txt)
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
+
+# ── Main loop ──────────────────────────────────────────────────────────────────
 
 def main():
     args = parse_args()
@@ -438,16 +484,17 @@ def main():
     opts = RGBMatrixOptions()
     opts.rows = 64
     opts.cols = 64
-    opts.hardware_mapping  = args.hardware_mapping
+    opts.hardware_mapping      = args.hardware_mapping
     if args.brightness is not None:
         opts.brightness = max(0, min(100, int(args.brightness)))
-    opts.gpio_slowdown        = int(args.gpio_slowdown)
+    opts.gpio_slowdown         = int(args.gpio_slowdown)
     opts.limit_refresh_rate_hz = 0
     if args.pixel_mapper:
         opts.pixel_mapper_config = args.pixel_mapper
     opts.drop_privileges = False
 
     matrix = RGBMatrix(options=opts)
+    canvas = matrix.CreateFrameCanvas()
 
     last_fetch        = 0.0
     last_hb           = 0.0
@@ -489,12 +536,12 @@ def main():
                 finally:
                     last_fetch = now
 
-            # Redraw only when minute changes or new data arrived
+            # Redraw every minute (time ticks) or on fresh weather data
             current_minute = int(now) // 60
             if weather_dirty or current_minute != last_drawn_minute:
                 try:
-                    pil_img = draw_frame(cache or {})
-                    matrix.SetImage(pil_img, 0, 0)
+                    draw_frame(canvas, cache or {}, now)
+                    canvas = matrix.SwapOnVSync(canvas)
                     last_drawn_minute = current_minute
                     weather_dirty     = False
                 except Exception as e:
