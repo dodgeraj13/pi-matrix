@@ -31,6 +31,8 @@ MAP_DIR        = os.getenv("MAP_DIR",        WEATHER_DIR)  # map_display.py live
 COUNTDOWN_DIR  = os.getenv("COUNTDOWN_DIR",  f"{REPO_ROOT}/matrix-countdown")
 SCREENSAVER_DIR= os.getenv("SCREENSAVER_DIR",f"{REPO_ROOT}/matrix-screensaver")
 STOPWATCH_DIR  = os.getenv("STOPWATCH_DIR",  f"{REPO_ROOT}/matrix-stopwatch")
+GIF_DIR        = os.getenv("GIF_DIR",        f"{REPO_ROOT}/matrix-gif")
+STOCKS_DIR     = os.getenv("STOCKS_DIR",     f"{REPO_ROOT}/matrix-stocks")
 
 HEADERS = {}
 if DEVICE_TOKEN:
@@ -59,6 +61,8 @@ _MODES: dict[int, tuple[str, str]] = {
     10: ("countdown_proc",   "_start_countdown"),
     11: ("screensaver_proc", "_start_screensaver"),
     12: ("stopwatch_proc",   "_start_stopwatch"),
+    13: ("gif_proc",         "_start_gif"),
+    14: ("stocks_proc",      "_start_stocks"),
 }
 
 # Ordered list of unique proc attributes for kill-all / brightness loops
@@ -101,6 +105,8 @@ class Runner:
         self.screensaver_animations: str = "rain,fire,plasma"
         self.screensaver_cycle_time: float = 25.0
         self.screensaver_fade_time: float = 2.0
+        self.gif_proc: subprocess.Popen | None = None
+        self.stocks_proc: subprocess.Popen | None = None
 
     @staticmethod
     def _is_running(p):
@@ -341,12 +347,22 @@ class Runner:
             "stopwatch", os.path.join(STOPWATCH_DIR, "stopwatch_display.py"),
             extra_args=["--start-time", str(self.stopwatch_start_time)])
 
+    def _start_gif(self):
+        if self._is_running(self.gif_proc): return
+        self.gif_proc = self._launch("gif", os.path.join(GIF_DIR, "gif_display.py"),
+                                     extra_args=self._backend_args())
+
+    def _start_stocks(self):
+        if self._is_running(self.stocks_proc): return
+        self.stocks_proc = self._launch("stocks", os.path.join(STOCKS_DIR, "stocks_display.py"),
+                                        extra_args=self._backend_args())
+
     def _kill_all(self):
         for attr in _ALL_PROCS:
             setattr(self, attr, self._stop(attr.replace("_proc", ""), getattr(self, attr)))
         # Remove stale heartbeat files so the watchdog doesn't immediately
         # kill a freshly-started process because the old run left a stale file.
-        for m in range(1, 13):
+        for m in range(1, 15):
             try:
                 os.remove(heartbeat_path(m))
             except (FileNotFoundError, PermissionError):
@@ -760,6 +776,11 @@ async def ws_loop():
                         runner.schedule_slots   = data.get("slots", [])
                         print(f"[agent] schedule updated: enabled={runner.schedule_enabled}, {len(runner.schedule_slots)} slots", flush=True)
                         runner._check_schedule()
+                    elif data.get("type") == "stocks_config":
+                        print("[agent] stocks_config updated — restarting if running", flush=True)
+                        if runner.mode == 14:
+                            runner.stocks_proc = runner._stop("stocks", runner.stocks_proc)
+                            runner._start_stocks()
                     elif data.get("type") == "cmd" and data.get("cmd") == "update":
                         _do_update()
         except Exception as e:
