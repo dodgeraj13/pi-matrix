@@ -187,11 +187,12 @@ def render_symbol(symbol, price, pct, spark):
 def render_loading(symbol):
     img = Image.new("RGB", (W, H), (0, 0, 0))
     draw = ImageDraw.Draw(img)
-    x = _centered_x(draw, symbol, _font_sym)
-    draw.text((x, 10), symbol, font=_font_sym, fill=(100, 100, 100))
-    dots = "..."
-    x2 = _centered_x(draw, dots, _font_price)
-    draw.text((x2, 35), dots, font=_font_price, fill=(80, 80, 80))
+    sym_display = symbol.replace("-USD", "").replace("-", "/")
+    x = _centered_x(draw, sym_display, _font_sym)
+    draw.text((x, 10), sym_display, font=_font_sym, fill=(180, 180, 255))
+    msg = "Loading..."
+    x2 = _centered_x(draw, msg, _font_pct)
+    draw.text((x2, 34), msg, font=_font_pct, fill=(160, 160, 160))
     return img
 
 # ── Main ──────────────────────────────────────────────────────────────────────
