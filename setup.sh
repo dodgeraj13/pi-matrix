@@ -24,7 +24,7 @@ command -v python3 >/dev/null 2>&1 || die "python3 not found."
 
 WHOAMI=$(whoami)
 HOME_DIR="/home/$WHOAMI"
-REPO_URL="https://github.com/dodgeraj13/pi_two.git"
+REPO_URL="https://github.com/dodgeraj13/pi-matrix.git"
 REPO_DIR="$HOME_DIR/matrix-agent"
 
 echo -e "${BOLD}"
