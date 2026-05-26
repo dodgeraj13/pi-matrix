@@ -182,6 +182,7 @@ class Runner:
             cfg.add_section("Matrix")
         cfg.set("Matrix", "hardware_mapping", "adafruit-hat-pwm")
         cfg.set("Matrix", "brightness", str(self.brightness))
+        cfg.set("Matrix", "idle_brightness", str(self.idle_brightness))
         cfg.set("Matrix", "gpio_slowdown", "2")
         cfg.set("Matrix", "limit_refresh_rate_hz", "0")
         cfg.set("Matrix", "shutdown_delay", "999999999")

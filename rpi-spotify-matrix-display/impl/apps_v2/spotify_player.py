@@ -286,15 +286,15 @@ class SpotifyScreen:
             # Check if we should show fallback yet
             idle_elapsed = time.time() - self.idle_start_time
             if idle_elapsed >= idle_delay:
-                # Show fallback after delay
+                # Past grace period — show fallback at idle brightness
                 idle_frame = self.generateIdleFrame(fallback_mode)
-                return (idle_frame, False)
+                return (idle_frame, False, True)   # is_idle_active=True → idle brightness
             else:
-                # Still in grace period, show last album art
+                # Grace period — still show last album art at normal brightness
                 frame = Image.new("RGB", (self.canvas_width, self.canvas_height), (0, 0, 0))
                 if self.current_art_img:
                     frame.paste(self.current_art_img, (0, 0))
-                return (frame, False)
+                return (frame, False, False)        # is_idle_active=False → normal brightness
 
         # Reset idle timer when playing
         self.idle_start_time = None
@@ -362,13 +362,13 @@ class SpotifyScreen:
                 # progress
                 draw.line((0, bar_y, play_w, bar_y), fill=self.play_color)
 
-            return (frame, self.is_playing)
+            return (frame, self.is_playing, False)
 
         # no response at all: still show last art (or blank)
         frame = Image.new("RGB", (self.canvas_width, self.canvas_height), (0, 0, 0))
         if self.current_art_img:
             frame.paste(self.current_art_img, (0, 0))
-        return (frame, False)
+        return (frame, False, False)
 
 
 def drawPlayPause(draw, is_playing, color):

@@ -47,7 +47,9 @@ def main():
     options.hardware_mapping = config.get('Matrix', 'hardware_mapping', fallback='regular')
     options.rows = canvas_width
     options.cols = canvas_height
-    options.brightness = 100 if is_emulated else config.getint('Matrix', 'brightness', fallback=100)
+    normal_brightness = 100 if is_emulated else config.getint('Matrix', 'brightness', fallback=100)
+    idle_brightness   = 100 if is_emulated else config.getint('Matrix', 'idle_brightness', fallback=20)
+    options.brightness = normal_brightness
     options.gpio_slowdown = config.getint('Matrix', 'gpio_slowdown', fallback=1)
     options.limit_refresh_rate_hz = config.getint('Matrix', 'limit_refresh_rate_hz', fallback=0)
     options.pixel_mapper_config = config.get('Matrix', 'pixel_mapper_config', fallback='')
@@ -57,20 +59,23 @@ def main():
     shutdown_delay = config.getint('Matrix', 'shutdown_delay', fallback=600)
     black_screen = Image.new("RGB", (canvas_width, canvas_height), (0,0,0))
     last_active_time = math.floor(time.time())
+    current_brightness = normal_brightness  # track to avoid redundant writes
 
     # generate image
     while(True):
         try:
             result = app_list[0].generate()
-            # generate() can return None or a non-iterable (e.g. False) when the
-            # Spotify module has no current playback data or hits an API error.
-            if isinstance(result, tuple) and len(result) == 2:
+            # generate() returns (frame, is_playing) or (frame, is_playing, is_idle_active)
+            if isinstance(result, tuple) and len(result) == 3:
+                frame, is_playing, is_idle_active = result
+            elif isinstance(result, tuple) and len(result) == 2:
                 frame, is_playing = result
+                is_idle_active = False
             else:
-                frame, is_playing = None, False
+                frame, is_playing, is_idle_active = None, False, False
         except Exception as e:
             print(f"[spotify] generate error: {e}", flush=True)
-            frame, is_playing = None, False
+            frame, is_playing, is_idle_active = None, False, False
         current_time = math.floor(time.time())
 
         if frame is not None:
@@ -80,6 +85,12 @@ def main():
                 frame = black_screen
         else:
             frame = black_screen
+
+        # Apply brightness: idle brightness only when the fallback content is shown
+        target_brightness = idle_brightness if is_idle_active else normal_brightness
+        if target_brightness != current_brightness:
+            matrix.brightness = target_brightness
+            current_brightness = target_brightness
 
         matrix.SetImage(frame)
         time.sleep(0.08)
