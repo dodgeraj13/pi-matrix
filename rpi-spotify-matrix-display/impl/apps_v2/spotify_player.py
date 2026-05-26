@@ -275,7 +275,9 @@ class SpotifyScreen:
         # Handle idle fallback response
         if response is not None and isinstance(response, tuple) and len(response) >= 2 and response[0] == 'idle':
             fallback_mode = response[1]
-            idle_delay = response[2] if len(response) > 2 else 5
+            idle_delay = int(response[2]) if len(response) > 2 else 5
+            if idle_delay < 0:
+                idle_delay = 0
 
             # Persist latest fallback config so rate-limited frames can use it
             self.idle_fallback = fallback_mode
@@ -286,6 +288,7 @@ class SpotifyScreen:
             # Track idle start time
             if self.idle_start_time is None:
                 self.idle_start_time = time.time()
+                print(f"[idle] Grace period started — fallback='{fallback_mode}' delay={idle_delay}s", flush=True)
 
             # Check if we should show fallback yet
             idle_elapsed = time.time() - self.idle_start_time
@@ -314,7 +317,9 @@ class SpotifyScreen:
                 return (frame, False, False)           # still in grace period → normal brightness
             return (frame, self.is_playing, False)
 
-        # Reset idle timer when we get a real playing response
+        # Reset idle timer when we get a real playing/non-idle response
+        if self.idle_start_time is not None:
+            print(f"[idle] Grace period cancelled — music resumed", flush=True)
         self.idle_start_time = None
 
         # determine state

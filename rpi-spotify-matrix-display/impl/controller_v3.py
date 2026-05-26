@@ -89,6 +89,7 @@ def main():
         # Apply brightness: idle brightness only when the fallback content is shown
         target_brightness = idle_brightness if is_idle_active else normal_brightness
         if target_brightness != current_brightness:
+            print(f"[ctrl] brightness {current_brightness} → {target_brightness} (is_idle_active={is_idle_active})", flush=True)
             matrix.brightness = target_brightness
             current_brightness = target_brightness
 
