@@ -20,11 +20,13 @@ HOME_DIR     = os.getenv("HOME_DIR", f"/home/{os.getenv('USER', 'pi_two')}")
 REPO_ROOT    = str(BASE.parent)  # one level up from matrix-agent/ = repo root
 
 MLB_DIR      = os.getenv("MLB_DIR",     f"{REPO_ROOT}/mlb-led-scoreboard")
-# Prefer rpi-spotify-matrix-display inside this repo (always committed, always pullable).
-# Fall back to the separately-cloned ~/rpi-spotify-matrix-display for Pi setups where
-# the repos live in separate directories.
-_repo_music   = os.path.join(REPO_ROOT, "rpi-spotify-matrix-display")
-_default_music = _repo_music if os.path.isdir(os.path.join(_repo_music, "impl")) else f"{HOME_DIR}/rpi-spotify-matrix-display"
+# Prefer rpi-spotify-matrix-display inside this repo when it has BOTH impl/ and a venv
+# (fully self-contained). Otherwise fall back to the separately-cloned
+# ~/rpi-spotify-matrix-display so Pi setups with the venv elsewhere still work.
+_repo_music    = os.path.join(REPO_ROOT, "rpi-spotify-matrix-display")
+_repo_has_all  = (os.path.isdir(os.path.join(_repo_music, "impl")) and
+                  os.path.exists(os.path.join(_repo_music, ".venv", "bin", "python3")))
+_default_music = _repo_music if _repo_has_all else f"{HOME_DIR}/rpi-spotify-matrix-display"
 MUSIC_DIR    = os.getenv("MUSIC_DIR", _default_music)
 MUSIC_IMPL   = os.path.join(MUSIC_DIR, "impl")
 _PI_MATRIX_REPO = "https://github.com/dodgeraj13/pi-matrix.git"
