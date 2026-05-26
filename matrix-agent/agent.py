@@ -20,8 +20,14 @@ HOME_DIR     = os.getenv("HOME_DIR", f"/home/{os.getenv('USER', 'pi_two')}")
 REPO_ROOT    = str(BASE.parent)  # one level up from matrix-agent/ = repo root
 
 MLB_DIR      = os.getenv("MLB_DIR",     f"{REPO_ROOT}/mlb-led-scoreboard")
-MUSIC_DIR    = os.getenv("MUSIC_DIR",   f"{HOME_DIR}/rpi-spotify-matrix-display")  # separate repo
+# Prefer rpi-spotify-matrix-display inside this repo (always committed, always pullable).
+# Fall back to the separately-cloned ~/rpi-spotify-matrix-display for Pi setups where
+# the repos live in separate directories.
+_repo_music   = os.path.join(REPO_ROOT, "rpi-spotify-matrix-display")
+_default_music = _repo_music if os.path.isdir(os.path.join(_repo_music, "impl")) else f"{HOME_DIR}/rpi-spotify-matrix-display"
+MUSIC_DIR    = os.getenv("MUSIC_DIR", _default_music)
 MUSIC_IMPL   = os.path.join(MUSIC_DIR, "impl")
+_PI_MATRIX_REPO = "https://github.com/dodgeraj13/pi-matrix.git"
 CLOCK_DIR    = os.getenv("CLOCK_DIR",   f"{REPO_ROOT}/matrix-clock")
 WEATHER_DIR  = os.getenv("WEATHER_DIR", f"{REPO_ROOT}/matrix-weather")
 PICTURE_DIR  = os.getenv("PICTURE_DIR", f"{REPO_ROOT}/matrix-picture")
@@ -252,8 +258,47 @@ class Runner:
             print(f"[agent] MLB start error: {e}", flush=True)
             self.mlb_proc = None
 
+    def _ensure_music_impl(self) -> bool:
+        """Verify impl/ exists with controller_v3.py; auto-restore from pi-matrix if not."""
+        controller = os.path.join(MUSIC_IMPL, "controller_v3.py")
+        if os.path.isdir(MUSIC_IMPL) and os.path.exists(controller):
+            return True
+        print(f"[agent] Music impl/ missing at {MUSIC_IMPL} — restoring from pi-matrix ...", flush=True)
+        tmp = "/tmp/pi-matrix-restore"
+        try:
+            subprocess.run(["rm", "-rf", tmp], capture_output=True)
+            subprocess.run([
+                "git", "clone", "--depth=1", "--filter=blob:none", "--no-checkout",
+                _PI_MATRIX_REPO, tmp,
+            ], check=True, timeout=120, capture_output=True)
+            subprocess.run(
+                ["git", "-C", tmp, "sparse-checkout", "set", "--cone",
+                 "rpi-spotify-matrix-display/impl"],
+                check=True, timeout=30, capture_output=True,
+            )
+            subprocess.run(["git", "-C", tmp, "checkout"], check=True, timeout=60, capture_output=True)
+            src = os.path.join(tmp, "rpi-spotify-matrix-display", "impl")
+            os.makedirs(MUSIC_DIR, exist_ok=True)
+            subprocess.run(["cp", "-r", src, MUSIC_DIR], check=True)
+            print(f"[agent] Music impl/ restored to {MUSIC_IMPL}", flush=True)
+            return True
+        except Exception as e:
+            print(f"[agent] Auto-restore failed: {e}", flush=True)
+            print(
+                f"[agent] Manual fix:\n"
+                f"  git clone --depth=1 {_PI_MATRIX_REPO} /tmp/pm\n"
+                f"  cp -r /tmp/pm/rpi-spotify-matrix-display/impl {MUSIC_DIR}/\n"
+                f"  rm -rf /tmp/pm",
+                flush=True,
+            )
+            return False
+        finally:
+            subprocess.run(["rm", "-rf", tmp], capture_output=True)
+
     def _start_music(self):
         if self._is_running(self.music_proc): return
+        if not self._ensure_music_impl():
+            return
         try:
             print("[agent] starting Music ...", flush=True)
             self._write_music_ini()
