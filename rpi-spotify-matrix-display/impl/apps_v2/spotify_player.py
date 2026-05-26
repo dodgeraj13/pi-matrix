@@ -277,6 +277,10 @@ class SpotifyScreen:
             fallback_mode = response[1]
             idle_delay = response[2] if len(response) > 2 else 5
 
+            # Persist latest fallback config so rate-limited frames can use it
+            self.idle_fallback = fallback_mode
+            self.idle_delay = idle_delay
+
             self.is_playing = False
 
             # Track idle start time
@@ -296,7 +300,21 @@ class SpotifyScreen:
                     frame.paste(self.current_art_img, (0, 0))
                 return (frame, False, False)        # is_idle_active=False → normal brightness
 
-        # Reset idle timer when playing
+        # Rate-limit sentinel (spotify_module returns True when skipping API call).
+        # Do NOT reset idle_start_time — preserve the grace period so it can expire.
+        if response is True:
+            frame = Image.new("RGB", (self.canvas_width, self.canvas_height), (0, 0, 0))
+            if self.current_art_img:
+                frame.paste(self.current_art_img, (0, 0))
+            if self.idle_start_time is not None:
+                idle_elapsed = time.time() - self.idle_start_time
+                if idle_elapsed >= self.idle_delay:
+                    idle_frame = self.generateIdleFrame(self.idle_fallback)
+                    return (idle_frame, False, True)   # grace period expired → idle brightness
+                return (frame, False, False)           # still in grace period → normal brightness
+            return (frame, self.is_playing, False)
+
+        # Reset idle timer when we get a real playing response
         self.idle_start_time = None
 
         # determine state
