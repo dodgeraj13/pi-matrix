@@ -19,7 +19,7 @@ WS_URL       = f"{_ws_base}?device={DEVICE_TOKEN}" if DEVICE_TOKEN and "?device=
 HOME_DIR     = os.getenv("HOME_DIR", f"/home/{os.getenv('USER', 'pi_two')}")
 REPO_ROOT    = str(BASE.parent)  # one level up from matrix-agent/ = repo root
 
-MLB_DIR      = os.getenv("MLB_DIR",     f"{REPO_ROOT}/mlb-led-scoreboard")
+MLB_DIR      = os.getenv("MLB_DIR",     f"{HOME_DIR}/mlb-led-scoreboard")
 MUSIC_DIR    = os.getenv("MUSIC_DIR",   f"{HOME_DIR}/rpi-spotify-matrix-display")
 MUSIC_IMPL   = os.path.join(MUSIC_DIR, "impl")
 _PI_MATRIX_REPO = "https://github.com/dodgeraj13/pi-matrix.git"
