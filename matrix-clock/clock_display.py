@@ -58,15 +58,20 @@ def find_font_path(candidates):
                 return p
     return None
 
+_FONT_CACHE = {}
+
 def load_font(candidates):
+    # Cached — draw_analog_clock calls this every frame and BDF loads hit disk
+    key = tuple(candidates)
+    if key in _FONT_CACHE:
+        return _FONT_CACHE[key]
     f = graphics.Font()
     p = find_font_path(candidates)
+    if not p:
+        p = find_font_path(["6x10.bdf"]) or find_font_path(["5x8.bdf"])
     if p:
         f.LoadFont(p)
-        return f
-    pf = find_font_path(["6x10.bdf"]) or find_font_path(["5x8.bdf"])
-    if pf:
-        f.LoadFont(pf)
+    _FONT_CACHE[key] = f
     return f
 
 def parse_args():

@@ -34,6 +34,7 @@ _text_config = {
     "scrollSpeed": 5
 }
 _cached_etag: str | None = None
+_font_cache: dict = {}
 
 # Font mapping - BDF fonts with their pixel heights
 FONT_MAP = {
@@ -144,13 +145,16 @@ def render_text_frame(text_config: dict, scroll_offset: int = 0) -> Image.Image:
     canvas = Image.new("RGB", (64, 64), (0, 0, 0))
     draw = ImageDraw.Draw(canvas)
 
-    # Load font
+    # Load font (cached — this runs every frame, don't hit disk each time)
     font_path = os.path.join(FONT_DIR, font_file)
-    try:
-        font = ImageFont.load(font_path)
-    except Exception as e:
-        print(f"[text] font load error: {e}, using default", flush=True)
-        font = ImageFont.load_default()
+    font = _font_cache.get(font_path)
+    if font is None:
+        try:
+            font = ImageFont.load(font_path)
+        except Exception as e:
+            print(f"[text] font load error: {e}, using default", flush=True)
+            font = ImageFont.load_default()
+        _font_cache[font_path] = font
 
     if scroll_mode == "scroll":
         # Scroll mode - single line scrolling
@@ -289,12 +293,11 @@ def main():
             gc.collect()
             last_gc = now
 
-        # Update scroll offset - always increment when in scroll mode
+        # Update scroll offset - always increment when in scroll mode.
+        # No arbitrary reset: the renderer wraps with modulo, and a hard reset
+        # mid-cycle caused a visible jump in the scrolling text.
         if _text_config.get("scrollMode") == "scroll":
             scroll_offset += 1
-            # Reset after a full cycle
-            if scroll_offset > 500:
-                scroll_offset = 0
         else:
             scroll_offset = 0
 

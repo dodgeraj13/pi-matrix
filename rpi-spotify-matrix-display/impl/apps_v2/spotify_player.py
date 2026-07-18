@@ -48,6 +48,7 @@ class SpotifyScreen:
 
         self.current_art_url = ''
         self.current_art_img = None
+        self.art_retry_after = 0.0  # backoff timestamp for failed art downloads
         self.current_title = ''
         self.current_artist = ''
 
@@ -232,11 +233,12 @@ class SpotifyScreen:
                 data = resp.json()
                 art_url = data.get('album_art')
                 if art_url and art_url != self.custom_album_url:
-                    self.custom_album_url = art_url
-                    # Download the image
+                    # Download the image; only remember the URL once it loads,
+                    # so a failed download gets retried next interval
                     img_resp = requests.get(art_url, timeout=5)
                     img = Image.open(BytesIO(img_resp.content))
                     self.custom_album_art = img.resize((self.canvas_width, self.canvas_height), Image.LANCZOS)
+                    self.custom_album_url = art_url
                     print(f"[spotify_player] Loaded custom album art for idle fallback")
         except Exception as e:
             print(f"[spotify_player] Failed to fetch custom album art: {e}")
@@ -303,19 +305,22 @@ class SpotifyScreen:
                     frame.paste(self.current_art_img, (0, 0))
                 return (frame, False, False)        # is_idle_active=False → normal brightness
 
-        # Rate-limit sentinel (spotify_module returns True when skipping API call).
-        # Do NOT reset idle_start_time — preserve the grace period so it can expire.
-        if response is True:
-            frame = Image.new("RGB", (self.canvas_width, self.canvas_height), (0, 0, 0))
-            if self.current_art_img:
-                frame.paste(self.current_art_img, (0, 0))
+        # Rate-limit sentinel (True) or transient error (None: network blip,
+        # backend 5xx, Render cold start). Keep whatever state we're in — never
+        # reset idle_start_time here, or a blip while idle cancels the fallback
+        # and flashes the old album art at full brightness.
+        if response is True or response is None:
             if self.idle_start_time is not None:
                 idle_elapsed = time.time() - self.idle_start_time
                 if idle_elapsed >= self.idle_delay:
                     idle_frame = self.generateIdleFrame(self.idle_fallback)
-                    return (idle_frame, False, True)   # grace period expired → idle brightness
+                    return (idle_frame, False, True)   # idle fallback stays up → idle brightness
+            frame = Image.new("RGB", (self.canvas_width, self.canvas_height), (0, 0, 0))
+            if self.current_art_img:
+                frame.paste(self.current_art_img, (0, 0))
+            if self.idle_start_time is not None:
                 return (frame, False, False)           # still in grace period → normal brightness
-            return (frame, self.is_playing, False)
+            return (frame, self.is_playing if response is True else False, False)
 
         # Reset idle timer when we get a real playing/non-idle response
         if self.idle_start_time is not None:
@@ -326,25 +331,24 @@ class SpotifyScreen:
         if response is not None:
             artist, title, art_url, self.is_playing, progress_ms, duration_ms = response
 
-            # load/update album art if URL changed
-            if art_url != self.current_art_url:
-                # Start fade transition
-                if self.current_art_img is not None:
-                    self.previous_art_img = self.current_art_img
-                    self.fade_progress = 0.0
-                    self.fade_steps = 0
-
-                self.current_art_url = art_url
+            # load/update album art if URL changed (URL only committed on success,
+            # so a failed download retries instead of leaving stale art up)
+            if art_url and art_url != self.current_art_url and time.time() >= self.art_retry_after:
                 try:
                     resp = requests.get(art_url, timeout=5)
                     img = Image.open(BytesIO(resp.content))
-                    self.current_art_img = img.resize((self.canvas_width, self.canvas_height), Image.LANCZOS)
+                    new_art = img.resize((self.canvas_width, self.canvas_height), Image.LANCZOS)
+                    # Start fade transition from the old art
+                    if self.current_art_img is not None:
+                        self.previous_art_img = self.current_art_img
+                        self.fade_progress = 0.0
+                        self.fade_steps = 0
+                    self.current_art_img = new_art
+                    self.current_art_url = art_url
                 except Exception as e:
                     print(f"[spotify_player] Failed to load album art: {e}")
-                    # Keep previous image if load fails
-                    if self.previous_art_img:
-                        self.current_art_img = self.previous_art_img
-                        self.fade_progress = 1.0
+                    # Keep old art up; retry the download in 5s
+                    self.art_retry_after = time.time() + 5
 
             # Update fade progress
             if self.fade_progress < 1.0 and self.previous_art_img is not None:

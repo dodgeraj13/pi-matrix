@@ -140,13 +140,15 @@ def main():
     last_gc = 0.0
     last_hb = 0.0
     last_poll = 0.0
+    last_drawn = None
 
     # Draw loop
     while True:
         now = time.time()
 
-        # Poll backend for image at most ~4�/sec (or slower if you want)
-        if now - last_poll > 0.25:
+        # Poll backend for a new image once a second (pictures change rarely;
+        # ETag/hash makes unchanged polls cheap but no need for 4/sec)
+        if now - last_poll > 1.0:
             fetch_if_changed(args.api_base, args.device_token)
             last_poll = now
 
@@ -164,11 +166,12 @@ def main():
             gc.collect()
             last_gc = now
 
-        # Draw the cached image if we have one
+        # Draw the cached image only when it actually changed
         try:
-            if _cached_img is not None:
+            if _cached_img is not None and _cached_img is not last_drawn:
                 # SetImage accepts a PIL Image in RGB
                 matrix.SetImage(_cached_img, 0, 0)
+                last_drawn = _cached_img
         except Exception as e:
             print(f"[picture] draw error: {e}", flush=True)
 

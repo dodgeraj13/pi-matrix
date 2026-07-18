@@ -89,10 +89,14 @@ def _time_color(remaining):
 
 # ── Drawing ───────────────────────────────────────────────────────────────────
 
-def _draw_centered_text(canvas, font, text, color_rgb, y):
-    """Draw text centred horizontally at row y. Returns width."""
+def _draw_centered_text(canvas, font, text, color_rgb, y, small_font=None):
+    """Draw text centred horizontally at row y. Falls back to small_font if
+    the text is wider than the 64px display (e.g. h:mm:ss). Returns width."""
     col = graphics.Color(*color_rgb)
     w = graphics.DrawText(canvas, font, -9999, -9999, col, text)
+    if w > 64 and small_font is not None:
+        font = small_font
+        w = graphics.DrawText(canvas, font, -9999, -9999, col, text)
     x = max(0, (64 - w) // 2)
     graphics.DrawText(canvas, font, x, y, col, text)
     return w
@@ -131,6 +135,7 @@ def main():
     canvas = matrix.CreateFrameCanvas()
 
     fnt_big   = _load_font(["10x20.bdf", "9x18.bdf", "8x13.bdf", "7x13.bdf"])
+    fnt_med   = _load_font(["8x13B.bdf", "8x13.bdf", "7x13.bdf", "6x12.bdf"])
     fnt_small = _load_font(["5x8.bdf", "4x6.bdf", "6x10.bdf"])
 
     end_time = args.end_time
@@ -203,7 +208,7 @@ def main():
 
         # ── Draw countdown ────────────────────────────────────────────────────
         _draw_centered_text(canvas, fnt_big, time_str, col,
-                            38 if show_bar else 40)
+                            38 if show_bar else 40, small_font=fnt_med)
 
         # ── Progress bar ──────────────────────────────────────────────────────
         if show_bar:

@@ -275,6 +275,7 @@ def main():
     last_hb          = 0.0
     last_cycle       = 0.0
     last_gc          = 0.0
+    last_render_key  = None
 
     while True:
         now = time.time()
@@ -315,18 +316,22 @@ def main():
             gc.collect()
             last_gc = now
 
-        # Render
+        # Render — only when the shown symbol or its data changed (the frame is
+        # static between changes, no point repainting it 10x/sec)
         if symbols:
             sym = symbols[sym_idx % len(symbols)]
-            try:
-                if sym in quotes:
-                    price, pct, day_spark, week_spark = quotes[sym]
-                    img = render_symbol(sym, price, pct, day_spark, week_spark)
-                else:
-                    img = render_loading(sym)
-                matrix.SetImage(img, 0, 0)
-            except Exception as e:
-                print(f"[stocks] render error: {e}", flush=True)
+            render_key = (sym, last_price_fetch)
+            if render_key != last_render_key:
+                try:
+                    if sym in quotes:
+                        price, pct, day_spark, week_spark = quotes[sym]
+                        img = render_symbol(sym, price, pct, day_spark, week_spark)
+                    else:
+                        img = render_loading(sym)
+                    matrix.SetImage(img, 0, 0)
+                    last_render_key = render_key
+                except Exception as e:
+                    print(f"[stocks] render error: {e}", flush=True)
 
         time.sleep(0.1)
 

@@ -140,6 +140,7 @@ def main():
     last_gc = 0.0
     last_hb = 0.0
     last_poll = 0.0
+    last_drawn = None
 
     # Draw loop
     while True:
@@ -164,11 +165,13 @@ def main():
             gc.collect()
             last_gc = now
 
-        # Draw the cached image if we have one
+        # Draw the cached image only when it actually changed (poll stays at
+        # 4/sec for live-draw responsiveness, but no need to repaint 20/sec)
         try:
-            if _cached_img is not None:
+            if _cached_img is not None and _cached_img is not last_drawn:
                 # SetImage accepts a PIL Image in RGB
                 matrix.SetImage(_cached_img, 0, 0)
+                last_drawn = _cached_img
         except Exception as e:
             print(f"[drawing] draw error: {e}", flush=True)
 
