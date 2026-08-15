@@ -88,7 +88,7 @@ class Runner:
         self.map_label_b   = ""     # friendly label for destination (e.g. "Work")
         self.map_submode   = "alternate"  # "basic" | "map" | "alternate"
         self.schedule_enabled = False
-        self.schedule_slots   = []   # [{"id":..,"start":"HH:MM","end":"HH:MM","mode":int}]
+        self.schedule_slots   = []   # [{"id":..,"start":"HH:MM","end":"HH:MM","mode":int,"days":[0-6]?}]
         self.mlb_proc: subprocess.Popen | None = None
         self.music_proc: subprocess.Popen | None = None
         self.clock_proc: subprocess.Popen | None = None
@@ -475,21 +475,29 @@ class Runner:
         self._force_restart()
 
     def _check_schedule(self):
-        """Apply mode based on current time. Called every 30 s."""
+        """Apply mode based on current time and weekday. Called every 30 s."""
         if not self.schedule_enabled or not self.schedule_slots:
             return
-        ct = datetime.datetime.now().strftime("%H:%M")
+        now = datetime.datetime.now()
+        ct = now.strftime("%H:%M")
+        today = now.weekday()          # 0 = Monday … 6 = Sunday
+        yesterday = (today - 1) % 7
         for slot in self.schedule_slots:
             start = slot.get("start", "")
             end   = slot.get("end",   "")
             mode  = int(slot.get("mode", 0))
+            # Optional weekday restriction; absent means the slot runs every day.
+            days  = slot.get("days") or (0, 1, 2, 3, 4, 5, 6)
             if not start or not end:
                 continue
-            # Support midnight-spanning slots (start > end)
             if start <= end:
-                in_slot = start <= ct < end
+                # Same-day window. String compare is safe for zero-padded HH:MM,
+                # and an end of "24:00" naturally means "until midnight".
+                in_slot = today in days and start <= ct < end
             else:
-                in_slot = ct >= start or ct < end
+                # Crosses midnight: either today's evening portion, or the
+                # early-morning tail of a slot that started yesterday.
+                in_slot = (today in days and ct >= start) or (yesterday in days and ct < end)
             if in_slot:
                 if self.mode != mode:
                     print(f"[schedule] {start}–{end} → mode {mode}", flush=True)
