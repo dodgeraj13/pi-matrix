@@ -358,7 +358,10 @@ class Runner:
 
     def _start_clock(self):
         if self._is_running(self.clock_proc): return
-        self.clock_proc = self._launch("clock", os.path.join(CLOCK_DIR, "clock_display.py"))
+        # Pass the backend args so the clock can read its own face setting —
+        # /clock-settings is per-device and needs the token.
+        self.clock_proc = self._launch("clock", os.path.join(CLOCK_DIR, "clock_display.py"),
+                                       extra_args=self._backend_args())
 
     def _start_weather(self):
         if self._is_running(self.weather_proc): return

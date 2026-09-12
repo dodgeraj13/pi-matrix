@@ -93,6 +93,8 @@ def parse_args():
     ap.add_argument("--hardware-mapping", type=str, default="adafruit-hat-pwm")
     ap.add_argument("--gpio-slowdown", type=int, default=2)
     ap.add_argument("--clock-type", type=str, default=None, choices=["digital", "analog"])
+    ap.add_argument("--api-base", type=str, default=None)
+    ap.add_argument("--device-token", type=str, default="")
     return ap.parse_args()
 
 def clear_canvas(canvas):
@@ -198,19 +200,29 @@ def draw_digital_clock(canvas, fnt_big):
     x2 = (64 - w2) // 2
     graphics.DrawText(canvas, fnt_big, x2, y + 16, gray, date_str)
 
-def fetch_clock_settings():
-    """Fetch clock type setting from backend"""
-    if not HAS_REQUESTS:
-        return "analog"  # Default to analog if no requests
+def fetch_clock_settings(api_base=None, device_token=""):
+    """Fetch the clock face setting from the backend.
 
+    /clock-settings is per-device and requires a token; this used to be called
+    without one, so it got a 400 every time and silently fell back to analog —
+    the setting has never actually taken effect.
+    """
+    if not HAS_REQUESTS:
+        return None
+
+    base = (api_base or BACKEND_URL).rstrip("/")
+    headers = {"X-Device-Token": device_token} if device_token else {}
     try:
-        resp = requests.get(f"{BACKEND_URL}/clock-settings", timeout=5)
+        resp = requests.get(f"{base}/clock-settings", headers=headers, timeout=5)
         if resp.status_code == 200:
-            data = resp.json()
-            return data.get("clock_type", "analog")
-    except Exception:
-        pass
-    return "analog"
+            ct = resp.json().get("clock_type")
+            return ct if ct in ("digital", "analog") else None
+        sys.stderr.write(f"[clock] settings fetch: HTTP {resp.status_code}\n")
+    except Exception as e:
+        sys.stderr.write(f"[clock] settings fetch failed: {e}\n")
+    # None, not "analog" — a failed lookup shouldn't silently override the
+    # face that's already on screen.
+    return None
 
 def main():
     args = parse_args()
@@ -257,7 +269,9 @@ def main():
 
             # Fetch settings from backend every 30 seconds (if no command line arg)
             if args.clock_type is None and now - last_settings_fetch > 30.0:
-                clock_type = fetch_clock_settings()
+                fetched = fetch_clock_settings(args.api_base, args.device_token)
+                if fetched:
+                    clock_type = fetched
                 last_settings_fetch = now
 
             try:
