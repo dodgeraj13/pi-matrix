@@ -32,6 +32,9 @@ _add_path(f"{_HOME}/rpi-spotify-matrix-display/rpi-rgb-led-matrix/bindings/pytho
 from rgbmatrix import RGBMatrix, RGBMatrixOptions, graphics
 
 HEARTBEAT = "/tmp/matrix-heartbeat-4"
+# How soon to retry while we have never managed a successful fetch. Short
+# enough to catch the network coming back, long enough not to hammer it.
+RETRY_S   = 20
 
 # ── BDF fonts ──────────────────────────────────────────────────────────────────
 _FONT_DIR = f"{_HOME}/rpi-spotify-matrix-display/rpi-rgb-led-matrix/fonts"
@@ -482,6 +485,31 @@ def draw_frame(canvas, wdata, now_ts=None):
                       graphics.Color(160, 165, 185), time_txt)
 
 
+def draw_loading(canvas, cfg, failed=False):
+    """Placeholder shown until the first fetch succeeds.
+
+    Without this the panel stayed black for as long as the first request took.
+    fetch_weather makes two calls with 8s timeouts each, so a slow or missing
+    network meant 16s or more of a display that just looked dead.
+
+    Drawing an ordinary frame with empty data isn't a substitute: with no data
+    there's no timezone offset yet, so the clock row would confidently show
+    UTC instead of local time.
+    """
+    canvas.Clear()
+    _draw_sun(canvas, 32, 16, r=7)
+
+    msg = "No signal" if failed else "Loading"
+    col = graphics.Color(210, 130, 110) if failed else graphics.Color(150, 160, 180)
+    graphics.DrawText(canvas, _F_MED, max(0, (64 - len(msg) * 5) // 2), 42, col, msg)
+
+    # Naming the place makes a wrong or missing location obvious at a glance.
+    loc = (cfg.get("location") or "").split(",")[0].strip()[:14]
+    if loc:
+        graphics.DrawText(canvas, _F_SMALL, max(0, (64 - len(loc) * 4) // 2), 54,
+                          graphics.Color(110, 120, 140), loc)
+
+
 # ── Main loop ──────────────────────────────────────────────────────────────────
 
 def main():
@@ -504,12 +532,21 @@ def main():
     matrix = RGBMatrix(options=opts)
     canvas = matrix.CreateFrameCanvas()
 
-    last_fetch        = 0.0
     last_hb           = 0.0
     last_drawn_minute = -1
     weather_dirty     = True
     cache             = None
     interval          = max(60, int(args.update_interval))
+    next_fetch        = 0.0     # 0 = fetch on the very first pass
+    fetch_failed      = False
+
+    # Put something on the panel before the first fetch blocks. A black screen
+    # for the length of an API call reads as a broken display.
+    try:
+        draw_loading(canvas, cfg)
+        canvas = matrix.SwapOnVSync(canvas)
+    except Exception as e:
+        sys.stderr.write(f"[weather] initial draw error: {e}\n")
 
     try:
         while True:
@@ -524,11 +561,16 @@ def main():
                     pass
                 last_hb = now
 
-            # Fetch weather
-            if now - last_fetch > interval or cache is None:
+            # Fetch weather. `cache is None` used to be part of this condition,
+            # which made it permanently true whenever the fetch was failing —
+            # so an outage meant retrying back to back forever. A failure now
+            # schedules the next attempt instead.
+            if now >= next_fetch:
                 try:
                     cache = fetch_weather(cfg)
                     weather_dirty = True
+                    fetch_failed  = False
+                    next_fetch    = now + interval
                     try:
                         import json
                         with open("/tmp/weather.json", "w") as wf:
@@ -541,14 +583,21 @@ def main():
                         pass
                 except Exception as e:
                     sys.stderr.write(f"[weather] fetch failed: {e}\n")
-                finally:
-                    last_fetch = now
+                    fetch_failed = True
+                    # Try again sooner while we've never had data at all, but
+                    # keep showing the last good reading if we have one.
+                    next_fetch = now + (RETRY_S if cache is None else interval)
+                    if cache is None:
+                        weather_dirty = True   # swap "Loading" for "No signal"
 
             # Redraw every minute (time ticks) or on fresh weather data
             current_minute = int(now) // 60
             if weather_dirty or current_minute != last_drawn_minute:
                 try:
-                    draw_frame(canvas, cache or {}, now)
+                    if cache is None:
+                        draw_loading(canvas, cfg, failed=fetch_failed)
+                    else:
+                        draw_frame(canvas, cache, now)
                     canvas = matrix.SwapOnVSync(canvas)
                     last_drawn_minute = current_minute
                     weather_dirty     = False
