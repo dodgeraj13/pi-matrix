@@ -92,6 +92,9 @@ class Runner:
         self.map_label_b   = ""     # friendly label for destination (e.g. "Work")
         self.map_submode   = "alternate"  # "basic" | "map" | "alternate"
         self.online = False         # WS reachable; gates network-dependent recovery
+        # Favorite team's game outranks the schedule while it is on.
+        self.game_override_active = False
+        self.pre_override_mode: int | None = None
         self.schedule_enabled = False
         self.schedule_slots   = []   # [{"id":..,"start":"HH:MM","end":"HH:MM","mode":int,"days":[0-6]?}]
         self.mlb_proc: subprocess.Popen | None = None
@@ -481,6 +484,10 @@ class Runner:
 
     def _check_schedule(self):
         """Apply mode based on current time and weekday. Called every 30 s."""
+        # A live game outranks the schedule — otherwise this would pull the
+        # display off the game within 30 seconds of it starting.
+        if self.game_override_active:
+            return
         if not self.schedule_enabled or not self.schedule_slots:
             return
         now = datetime.datetime.now()
@@ -785,6 +792,13 @@ async def ws_loop():
                     except Exception:
                         continue
                     if data.get("type") == "state":
+                        # An explicit pick from the app wins over the game
+                        # override — otherwise the user couldn't switch away
+                        # from a game they don't want to watch.
+                        if "mode" in data and runner.game_override_active:
+                            print("[agent] mode picked by hand — releasing game override", flush=True)
+                            runner.game_override_active = False
+                            runner.pre_override_mode = None
                         if "mode" in data: runner.apply_mode(int(data["mode"]))
                         if "brightness" in data: runner.apply_brightness(int(data["brightness"]))
                         if "rotation" in data: runner.apply_rotation(int(data["rotation"]))
@@ -865,6 +879,26 @@ async def ws_loop():
                             # Restart stopwatch with new start time
                             runner.stopwatch_proc = runner._stop("stopwatch", runner.stopwatch_proc)
                             runner._start_stopwatch()
+                    elif data.get("type") == "game_override":
+                        active = bool(data.get("active"))
+                        if active and not runner.game_override_active:
+                            runner.game_override_active = True
+                            runner.pre_override_mode = runner.mode
+                            print(f"[agent] favorite team is playing — switching to MLB "
+                                  f"(was mode {runner.mode})", flush=True)
+                            runner.apply_mode(1)
+                        elif not active and runner.game_override_active:
+                            runner.game_override_active = False
+                            prev = runner.pre_override_mode
+                            runner.pre_override_mode = None
+                            print("[agent] game over — restoring previous display", flush=True)
+                            if runner.schedule_enabled and runner.schedule_slots:
+                                # Let the schedule decide; it knows what should
+                                # be on right now, which may differ from what
+                                # was showing when the game started.
+                                runner._check_schedule()
+                            elif prev is not None:
+                                runner.apply_mode(prev)
                     elif data.get("type") == "schedule":
                         runner.schedule_enabled = bool(data.get("enabled", False))
                         runner.schedule_slots   = data.get("slots", [])
