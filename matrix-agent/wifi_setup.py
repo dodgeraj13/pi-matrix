@@ -59,6 +59,25 @@ def is_online() -> bool:
     except OSError:
         return False
 
+# How long to let NetworkManager re-join a known network before giving up and
+# starting the agent anyway, and how often to poll while waiting.
+CONNECT_GRACE_S = 90
+ONLINE_POLL_S   = 5
+# While stuck in hotspot mode, how often to drop the AP and check whether a
+# known network has come back.
+ESCAPE_PROBE_S  = 300
+
+def wait_for_online(seconds: int) -> bool:
+    """Poll for connectivity up to `seconds`. Sleeps between checks, so this
+    costs essentially nothing while waiting."""
+    deadline = time.time() + seconds
+    while True:
+        if is_online():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(ONLINE_POLL_S)
+
 # ──────────────────────────────────────────────
 # nmcli helpers
 # ──────────────────────────────────────────────
@@ -72,6 +91,21 @@ def _run(*args, timeout: int = 10) -> subprocess.CompletedProcess:
 
 def wlan0_exists() -> bool:
     return _run("ip", "link", "show", "wlan0").returncode == 0
+
+def has_saved_wifi() -> bool:
+    """True if NetworkManager already knows a WiFi network to join.
+
+    If it does, being offline means the network is away — not that this device
+    needs provisioning — and NM will re-join on its own once it returns.
+    """
+    r = _nmcli("-t", "-f", "TYPE,NAME", "con", "show", timeout=10)
+    if r.returncode != 0:
+        return False
+    for line in r.stdout.splitlines():
+        typ, _, name = line.partition(":")
+        if "wireless" in typ and name and name != HOTSPOT_CON_NAME:
+            return True
+    return False
 
 # ──────────────────────────────────────────────
 # Captive portal DNS redirect
@@ -153,6 +187,30 @@ def stop_hotspot() -> None:
     _nmcli("con", "down", HOTSPOT_CON_NAME)
     _nmcli("con", "delete", HOTSPOT_CON_NAME)
     print("[wifi] Hotspot stopped.")
+
+def try_rejoin_saved_network() -> bool:
+    """Briefly leave hotspot mode to test whether a known network is back.
+
+    wlan0 cannot see other networks while it is acting as an access point, so
+    the only way to notice the router returning is to stop being one for a
+    moment. Returns True if we got back online (hotspot already torn down);
+    otherwise the hotspot and captive portal are restored.
+    """
+    if not has_saved_wifi():
+        return False
+    print("[wifi] Probing for a known network ...")
+    _remove_port_redirect()
+    stop_hotspot()
+    _remove_captive_conf()
+    _nmcli("device", "connect", "wlan0", timeout=45)
+    if wait_for_online(20):
+        return True
+    print("[wifi] Still no network — resuming hotspot.")
+    _write_captive_conf()
+    create_hotspot()
+    time.sleep(1)
+    _add_port_redirect()
+    return False
 
 def _parse_scan_output(stdout: str) -> list:
     seen = set()
@@ -479,12 +537,25 @@ def main() -> int:
         if is_online():
             print("[wifi] Online — nothing to do.")
             return 0
-        print("[wifi] Offline — retrying in 10 s...")
-        time.sleep(10)
-        if is_online():
-            print("[wifi] Online after retry.")
+
+        # Offline. If NetworkManager already knows a network, this is almost
+        # always a transient outage — a router rebooting, or the agent
+        # restarting mid-outage — not a device that needs provisioning.
+        # Becoming a hotspot here would strand the Pi: wlan0 stops being a
+        # client, so it can never see the network come back, and the display
+        # never starts. Wait for NM to re-join, then start the agent either
+        # way; NM keeps retrying in the background at no cost to us.
+        if has_saved_wifi():
+            print(f"[wifi] Offline, but a network is already configured — "
+                  f"waiting up to {CONNECT_GRACE_S}s for it to come back ...")
+            if wait_for_online(CONNECT_GRACE_S):
+                print("[wifi] Reconnected.")
+            else:
+                print("[wifi] Still offline — starting the agent anyway. "
+                      "NetworkManager will keep trying to reconnect.")
             return 0
-        print("[wifi] Still offline — starting provisioning.")
+
+        print("[wifi] Offline and no network configured — starting provisioning.")
     else:
         print("[wifi] --force-setup: entering hotspot mode.")
 
@@ -510,11 +581,21 @@ def main() -> int:
     print(f"[wifi] Or manually connect to '{HOTSPOT_SSID}' and open http://{HOTSPOT_IP}:{HTTP_PORT}/")
 
     try:
+        last_probe = time.time()
         while True:
             time.sleep(3)
             if _server_state["success"] or is_online():
                 print("[wifi] Online — shutting down provisioning.")
                 break
+            # Don't wait on a human forever. If a network was configured at
+            # some point, periodically stop being an access point long enough
+            # to check whether it is reachable again, so the Pi can recover on
+            # its own after an outage instead of sitting in setup mode.
+            if time.time() - last_probe >= ESCAPE_PROBE_S:
+                last_probe = time.time()
+                if try_rejoin_saved_network():
+                    print("[wifi] Rejoined a known network — leaving setup mode.")
+                    break
     except KeyboardInterrupt:
         print("\n[wifi] Interrupted.")
     finally:

@@ -47,6 +47,10 @@ def heartbeat_path(mode:int) -> str:
 def _now() -> float:
     return time.time()
 
+# Ceiling for WebSocket reconnect backoff. During a long outage the agent
+# settles to one attempt a minute instead of hammering a dead network.
+MAX_WS_BACKOFF = 60
+
 # Maps mode int → (proc_attr_name, start_method_name)
 # Modes 2 and 8 share the same process (music_proc / _start_music).
 _MODES: dict[int, tuple[str, str]] = {
@@ -87,6 +91,7 @@ class Runner:
         self.map_label_a   = ""     # friendly label for origin  (e.g. "Home")
         self.map_label_b   = ""     # friendly label for destination (e.g. "Work")
         self.map_submode   = "alternate"  # "basic" | "map" | "alternate"
+        self.online = False         # WS reachable; gates network-dependent recovery
         self.schedule_enabled = False
         self.schedule_slots   = []   # [{"id":..,"start":"HH:MM","end":"HH:MM","mode":int,"days":[0-6]?}]
         self.mlb_proc: subprocess.Popen | None = None
@@ -655,6 +660,14 @@ async def watchdog_loop(runner: Runner, interval=5, stall_s=90):
             if p is not None and not Runner._is_running(p):
                 print(f"[agent] watchdog: mode {mode} process died; restarting", flush=True)
                 runner.restart_current()
+            elif stale and not runner.online:
+                # Display scripts fetch their own data over HTTP, so while the
+                # network is down they sit in socket timeouts and miss their
+                # heartbeat. That is expected, and restarting doesn't fix it —
+                # it just re-inits the LED panel every 90s and makes an outage
+                # look like a hardware fault. Leave it be until we're back.
+                print(f"[agent] watchdog: mode {mode} heartbeat stale, but offline — "
+                      f"leaving it alone", flush=True)
             elif stale:
                 print(f"[agent] watchdog: mode {mode} heartbeat stale; restarting", flush=True)
                 runner.restart_current()
@@ -755,11 +768,16 @@ async def ws_loop():
     asyncio.create_task(schedule_loop(runner))
     asyncio.create_task(brightness_schedule_loop(runner))
 
+    backoff = 1
     while True:
         try:
+            runner.online = False
             print(f"[agent] connecting WS {WS_URL}", flush=True)
-            async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as ws:
+            async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20,
+                                          open_timeout=15) as ws:
                 print("[agent] WS connected", flush=True)
+                runner.online = True
+                backoff = 1
                 await ws.send(json.dumps({"type":"hello","from":"pi"}))
                 async for msg in ws:
                     try:
@@ -859,17 +877,27 @@ async def ws_loop():
                             runner._start_stocks()
                     elif data.get("type") == "cmd" and data.get("cmd") == "update":
                         _do_update()
+            # Server closed the socket cleanly. Pause briefly so a backend that
+            # drops us immediately can't spin this into a tight reconnect loop.
+            runner.online = False
+            await asyncio.sleep(2)
         except Exception as e:
-            print(f"[agent] ws error: {e}", flush=True)
-            # short poll during backoff
-            for _ in range(3):
-                s = fetch_state()
-                if s:
-                    m, b, rot = s
-                    runner.apply_mode(m)
-                    runner.apply_brightness(b)
-                    runner.apply_rotation(rot)
-                await asyncio.sleep(1)
+            runner.online = False
+            print(f"[agent] ws error: {e} (retry in {backoff}s)", flush=True)
+            # Poll state while we're disconnected, but off the event loop —
+            # requests blocks, and with the network down a single call can sit
+            # in DNS for tens of seconds, freezing the watchdog and schedule
+            # tasks along with it.
+            s = await loop.run_in_executor(None, fetch_state)
+            if s:
+                m, b, rot = s
+                runner.apply_mode(m)
+                runner.apply_brightness(b)
+                runner.apply_rotation(rot)
+            # Back off instead of reconnecting every few seconds. During a long
+            # outage this settles to one attempt a minute rather than hundreds.
+            await asyncio.sleep(backoff)
+            backoff = min(MAX_WS_BACKOFF, backoff * 2)
 
 def main():
     if not BACKEND_BASE or not WS_URL:
