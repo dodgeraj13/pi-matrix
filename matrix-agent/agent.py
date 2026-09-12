@@ -34,6 +34,7 @@ SCREENSAVER_DIR= os.getenv("SCREENSAVER_DIR",f"{REPO_ROOT}/matrix-screensaver")
 STOPWATCH_DIR  = os.getenv("STOPWATCH_DIR",  f"{REPO_ROOT}/matrix-stopwatch")
 GIF_DIR        = os.getenv("GIF_DIR",        f"{REPO_ROOT}/matrix-gif")
 STOCKS_DIR     = os.getenv("STOCKS_DIR",     f"{REPO_ROOT}/matrix-stocks")
+MESSAGE_DIR    = os.getenv("MESSAGE_DIR",    f"{REPO_ROOT}/matrix-message")
 
 HEADERS = {}
 if DEVICE_TOKEN:
@@ -68,6 +69,7 @@ _MODES: dict[int, tuple[str, str]] = {
     12: ("stopwatch_proc",   "_start_stopwatch"),
     13: ("gif_proc",         "_start_gif"),
     14: ("stocks_proc",      "_start_stocks"),
+    15: ("message_proc",     "_start_message"),
 }
 
 # Ordered list of unique proc attributes for kill-all / brightness loops
@@ -92,7 +94,10 @@ class Runner:
         self.map_label_b   = ""     # friendly label for destination (e.g. "Work")
         self.map_submode   = "alternate"  # "basic" | "map" | "alternate"
         self.online = False         # WS reachable; gates network-dependent recovery
-        # Favorite team's game outranks the schedule while it is on.
+        # Display priority, highest first: an unread message from a paired
+        # display, then a favorite team's live game, then the schedule.
+        self.message_active = False
+        self.pre_message_mode: int | None = None
         self.game_override_active = False
         self.pre_override_mode: int | None = None
         self.schedule_enabled = False
@@ -116,6 +121,7 @@ class Runner:
         self.screensaver_fade_time: float = 2.0
         self.gif_proc: subprocess.Popen | None = None
         self.stocks_proc: subprocess.Popen | None = None
+        self.message_proc: subprocess.Popen | None = None
 
     @staticmethod
     def _is_running(p):
@@ -398,6 +404,11 @@ class Runner:
             "stopwatch", os.path.join(STOPWATCH_DIR, "stopwatch_display.py"),
             extra_args=["--start-time", str(self.stopwatch_start_time)])
 
+    def _start_message(self):
+        if self._is_running(self.message_proc): return
+        self.message_proc = self._launch("message", os.path.join(MESSAGE_DIR, "message_display.py"),
+                                         extra_args=self._backend_args())
+
     def _start_gif(self):
         if self._is_running(self.gif_proc): return
         self.gif_proc = self._launch("gif", os.path.join(GIF_DIR, "gif_display.py"),
@@ -484,9 +495,9 @@ class Runner:
 
     def _check_schedule(self):
         """Apply mode based on current time and weekday. Called every 30 s."""
-        # A live game outranks the schedule — otherwise this would pull the
-        # display off the game within 30 seconds of it starting.
-        if self.game_override_active:
+        # An unread message and a live game both outrank the schedule —
+        # otherwise this would pull the display off them within 30 seconds.
+        if self.message_active or self.game_override_active:
             return
         if not self.schedule_enabled or not self.schedule_slots:
             return
@@ -879,20 +890,56 @@ async def ws_loop():
                             # Restart stopwatch with new start time
                             runner.stopwatch_proc = runner._stop("stopwatch", runner.stopwatch_proc)
                             runner._start_stopwatch()
+                    elif data.get("type") == "inbox":
+                        waiting = int(data.get("count", 0)) > 0
+                        if waiting and not runner.message_active:
+                            runner.message_active = True
+                            # Remember what to go back to. If a game override
+                            # is up, that layer owns the restore, so leave its
+                            # remembered mode alone and note the game instead.
+                            runner.pre_message_mode = runner.mode
+                            print(f"[agent] message received — showing it "
+                                  f"(was mode {runner.mode})", flush=True)
+                            runner.apply_mode(15)
+                        elif not waiting and runner.message_active:
+                            runner.message_active = False
+                            prev = runner.pre_message_mode
+                            runner.pre_message_mode = None
+                            print("[agent] messages dismissed — restoring display", flush=True)
+                            if runner.game_override_active:
+                                # A game was on before the message arrived and
+                                # is presumably still on; hand the panel back.
+                                runner.apply_mode(1)
+                            elif runner.schedule_enabled and runner.schedule_slots:
+                                runner._check_schedule()
+                            elif prev is not None:
+                                runner.apply_mode(prev)
                     elif data.get("type") == "game_override":
                         active = bool(data.get("active"))
                         if active and not runner.game_override_active:
                             runner.game_override_active = True
-                            runner.pre_override_mode = runner.mode
-                            print(f"[agent] favorite team is playing — switching to MLB "
-                                  f"(was mode {runner.mode})", flush=True)
-                            runner.apply_mode(1)
+                            runner.pre_override_mode = (
+                                runner.pre_message_mode if runner.message_active else runner.mode
+                            )
+                            if runner.message_active:
+                                # A message is on screen and outranks the game.
+                                # Record it; dismissing the message lands on MLB.
+                                print("[agent] favorite team is playing — queued "
+                                      "behind the message on screen", flush=True)
+                            else:
+                                print(f"[agent] favorite team is playing — switching to MLB "
+                                      f"(was mode {runner.mode})", flush=True)
+                                runner.apply_mode(1)
                         elif not active and runner.game_override_active:
                             runner.game_override_active = False
                             prev = runner.pre_override_mode
                             runner.pre_override_mode = None
                             print("[agent] game over — restoring previous display", flush=True)
-                            if runner.schedule_enabled and runner.schedule_slots:
+                            if runner.message_active:
+                                # The message owns the panel; it will restore
+                                # to the schedule itself when dismissed.
+                                runner.pre_message_mode = prev
+                            elif runner.schedule_enabled and runner.schedule_slots:
                                 # Let the schedule decide; it knows what should
                                 # be on right now, which may differ from what
                                 # was showing when the game started.
