@@ -10,7 +10,17 @@ def _add_path(p: str):
         sys.path.append(p)
 
 # Repo root is one level above matrix-clock/ — clock_utils.py lives there
-_add_path(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+_add_path(_REPO_ROOT)
+_add_path(os.path.join(_REPO_ROOT, "matrix-common"))
+
+# Notification overlay. Optional on purpose — if the module or PIL is missing,
+# attach() is a no-op and the clock behaves exactly as it did before.
+try:
+    from matrix_toast import attach as _attach_toast
+except Exception:
+    def _attach_toast(m):
+        return m
 
 # Import shared clock constants
 try:
@@ -215,7 +225,7 @@ def main():
         opts.pixel_mapper_config = args.pixel_mapper
     opts.drop_privileges = False
 
-    matrix = RGBMatrix(options=opts)
+    matrix = _attach_toast(RGBMatrix(options=opts))
     off = matrix.CreateFrameCanvas()
 
     # Load bigger fonts
