@@ -45,6 +45,38 @@ elif API_TOKEN:
 def heartbeat_path(mode:int) -> str:
     return f"/tmp/matrix-heartbeat-{mode}"
 
+# Notifications are dropped here for whichever display script is running to
+# pick up and composite over its own frames. A file rather than a socket per
+# script: the agent already holds the only connection to the backend, display
+# processes come and go on every mode switch, and polling one small file costs
+# nothing next to opening a WebSocket from each of them.
+NOTIFY_FILE = "/tmp/matrix-notify.json"
+_notify_seq = 0
+
+def write_notification(payload: dict) -> None:
+    """Publish a toast for the running display script. Writes via a temp file
+    and renames, so a script never reads a half-written frame of JSON."""
+    global _notify_seq
+    _notify_seq += 1
+    doc = {
+        "seq": _notify_seq,                       # lets a reader spot a repeat
+        "ts": time.time(),
+        "text": payload.get("text", ""),
+        "title": payload.get("title", ""),
+        "duration": float(payload.get("duration", 4.0) or 4.0),
+        "icon": payload.get("icon", ""),
+    }
+    try:
+        tmp = NOTIFY_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(doc, f)
+        os.replace(tmp, NOTIFY_FILE)
+        # Display scripts run as root under sudo; the agent does not, so keep
+        # the file world-readable rather than relying on a default umask.
+        os.chmod(NOTIFY_FILE, 0o644)
+    except Exception as e:
+        print(f"[agent] notification write error: {e}", flush=True)
+
 def _now() -> float:
     return time.time()
 
@@ -890,6 +922,14 @@ async def ws_loop():
                             # Restart stopwatch with new start time
                             runner.stopwatch_proc = runner._stop("stopwatch", runner.stopwatch_proc)
                             runner._start_stopwatch()
+                    elif data.get("type") == "notification":
+                        # Hand off to whatever display script is running; the
+                        # agent doesn't own the panel, so it can't draw itself.
+                        print(f"[agent] notification: {data.get('text','')[:40]!r}", flush=True)
+                        write_notification(data)
+                    elif data.get("type") == "notification_settings":
+                        print(f"[agent] notification settings: enabled="
+                              f"{data.get('enabled')} duration={data.get('duration')}", flush=True)
                     elif data.get("type") == "inbox":
                         waiting = int(data.get("count", 0)) > 0
                         if waiting and not runner.message_active:
