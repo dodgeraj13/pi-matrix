@@ -134,6 +134,10 @@ class Runner:
         self.pre_override_mode: int | None = None
         self.schedule_enabled = False
         self.schedule_slots   = []   # [{"id":..,"start":"HH:MM","end":"HH:MM","mode":int,"days":[0-6]?}]
+        # A mode chosen by hand holds until the schedule moves on to its next
+        # period, rather than being undone on the next 30s tick.
+        self.schedule_hold     = False
+        self.schedule_hold_key = None
         self.mlb_proc: subprocess.Popen | None = None
         self.music_proc: subprocess.Popen | None = None
         self.clock_proc: subprocess.Popen | None = None
@@ -528,14 +532,8 @@ class Runner:
         # helper: restart current mode (used by watchdog)
         self._force_restart()
 
-    def _check_schedule(self):
-        """Apply mode based on current time and weekday. Called every 30 s."""
-        # An unread message and a live game both outrank the schedule —
-        # otherwise this would pull the display off them within 30 seconds.
-        if self.message_active or self.game_override_active:
-            return
-        if not self.schedule_enabled or not self.schedule_slots:
-            return
+    def _active_slot(self):
+        """The slot that should be running right now, or None during a gap."""
         now = datetime.datetime.now()
         ct = now.strftime("%H:%M")
         today = now.weekday()          # 0 = Monday … 6 = Sunday
@@ -543,7 +541,6 @@ class Runner:
         for slot in self.schedule_slots:
             start = slot.get("start", "")
             end   = slot.get("end",   "")
-            mode  = int(slot.get("mode", 0))
             # Optional weekday restriction; absent means the slot runs every day.
             days  = slot.get("days") or (0, 1, 2, 3, 4, 5, 6)
             if not start or not end:
@@ -557,14 +554,56 @@ class Runner:
                 # early-morning tail of a slot that started yesterday.
                 in_slot = (today in days and ct >= start) or (yesterday in days and ct < end)
             if in_slot:
-                if self.mode != mode:
-                    print(f"[schedule] {start}–{end} → mode {mode}", flush=True)
-                    self.apply_mode(mode)
-                return
-        # No active slot — turn off if schedule is controlling display
-        if self.mode != 0:
-            print(f"[schedule] no active slot → off", flush=True)
-            self.apply_mode(0)
+                return slot
+        return None
+
+    @staticmethod
+    def _slot_key(slot):
+        """Identity of a scheduled period, used to notice when one period gives
+        way to the next. None means a gap, which is itself a period worth
+        holding through. Falls back to the times when a slot carries no id."""
+        if slot is None:
+            return "__gap__"
+        return slot.get("id") or f"{slot.get('start')}-{slot.get('end')}-{slot.get('mode')}"
+
+    def hold_for_manual(self):
+        """Pin a hand-picked mode until the schedule reaches its next period.
+
+        Without this the schedule reclaimed the panel within 30 seconds, so
+        choosing a mode by hand while a schedule was running looked broken.
+        """
+        if not self.schedule_enabled:
+            return
+        self.schedule_hold = True
+        self.schedule_hold_key = self._slot_key(self._active_slot())
+        print("[schedule] holding manual pick until the next period", flush=True)
+
+    def _check_schedule(self):
+        """Apply mode based on current time and weekday. Called every 30 s."""
+        # An unread message and a live game both outrank the schedule —
+        # otherwise this would pull the display off them within 30 seconds.
+        if self.message_active or self.game_override_active:
+            return
+        if not self.schedule_enabled or not self.schedule_slots:
+            return
+
+        slot = self._active_slot()
+        key  = self._slot_key(slot)
+
+        if self.schedule_hold:
+            if key == self.schedule_hold_key:
+                return                     # same period — the hand-pick stands
+            print("[schedule] next period reached — releasing manual hold", flush=True)
+            self.schedule_hold = False
+            self.schedule_hold_key = None
+
+        target = int(slot.get("mode", 0)) if slot else 0
+        if self.mode != target:
+            if slot:
+                print(f"[schedule] {slot.get('start')}–{slot.get('end')} → mode {target}", flush=True)
+            else:
+                print("[schedule] no active slot → off", flush=True)
+            self.apply_mode(target)
 
 def _fetch(path: str) -> dict:
     """GET {BACKEND_BASE}{path}, return parsed JSON or {} on any failure."""
@@ -845,7 +884,14 @@ async def ws_loop():
                             print("[agent] mode picked by hand — releasing game override", flush=True)
                             runner.game_override_active = False
                             runner.pre_override_mode = None
-                        if "mode" in data: runner.apply_mode(int(data["mode"]))
+                        if "mode" in data:
+                            m = int(data["mode"])
+                            # Only an actual change is a deliberate pick; state
+                            # is also broadcast for brightness and auto-sleep,
+                            # and those shouldn't pin the schedule.
+                            if m != runner.mode:
+                                runner.hold_for_manual()
+                            runner.apply_mode(m)
                         if "brightness" in data: runner.apply_brightness(int(data["brightness"]))
                         if "rotation" in data: runner.apply_rotation(int(data["rotation"]))
                         if data.get("force"): runner._force_restart()
@@ -992,6 +1038,10 @@ async def ws_loop():
                     elif data.get("type") == "schedule":
                         runner.schedule_enabled = bool(data.get("enabled", False))
                         runner.schedule_slots   = data.get("slots", [])
+                        # Editing the schedule is itself an instruction — drop
+                        # any hold so the new one takes effect straight away.
+                        runner.schedule_hold = False
+                        runner.schedule_hold_key = None
                         print(f"[agent] schedule updated: enabled={runner.schedule_enabled}, {len(runner.schedule_slots)} slots", flush=True)
                         runner._check_schedule()
                     elif data.get("type") == "stocks_config":
