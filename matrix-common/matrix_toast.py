@@ -29,8 +29,16 @@ import time
 
 NOTIFY_FILE = os.environ.get("MATRIX_NOTIFY_FILE", "/tmp/matrix-notify.json")
 POLL_S      = 0.25      # how often to stat the file; a stat is ~free
-FADE_S      = 0.30      # in and out
+SLIDE_S     = 0.45      # slide in / slide out
+ANIM_FPS    = 30.0      # frame rate a host loop should run at while animating
+MAX_BANNER_H= 30        # under half a 64px panel: a notice, not a takeover
 W = H = 64
+
+
+def _ease_out(p):
+    """Fast at first, settling at the end — reads as deceleration."""
+    p = max(0.0, min(1.0, p))
+    return 1.0 - (1.0 - p) ** 3
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -116,33 +124,49 @@ class Toast:
         except Exception:
             self._banner = None
 
+    # ── animation ──
+    def _rows_visible(self, now):
+        """How many rows of the banner are on screen right now.
+
+        The banner slides up from below the bottom edge rather than fading.
+        A slide needs no knowledge of what's underneath, so it works
+        identically whether we can read the frame back or not — and it stays
+        legible the whole way, where a half-faded banner just looks murky.
+        Returns 0 when nothing should be drawn.
+        """
+        if self._banner is None:
+            return 0
+        elapsed = now - self._start
+        if elapsed < 0 or elapsed > self._dur:
+            self._banner = None
+            return 0
+        if elapsed < SLIDE_S:
+            p = _ease_out(elapsed / SLIDE_S)
+        elif elapsed > self._dur - SLIDE_S:
+            p = _ease_out(max(0.0, (self._dur - elapsed) / SLIDE_S))
+        else:
+            p = 1.0
+        return int(round(self._h * p))
+
+    def animating(self, now=None):
+        """True while the banner is sliding, so a host loop can draw faster."""
+        if self._banner is None:
+            return False
+        e = (now or time.time()) - self._start
+        return 0 <= e < SLIDE_S or (self._dur - SLIDE_S) < e <= self._dur
+
     # ── compositing ──
     def apply(self, frame):
-        """Return `frame` with the banner blended in, or unchanged."""
+        """Return `frame` with the banner composited in, or unchanged."""
         now = time.time()
         self._poll(now)
-        if self._banner is None:
+        n = self._rows_visible(now)
+        if n <= 0:
             return frame
-        elapsed = now - self._start
-        if elapsed > self._dur:
-            self._banner = None
-            return frame
-
-        # Ease in, hold, ease out.
-        if elapsed < FADE_S:
-            a = elapsed / FADE_S
-        elif elapsed > self._dur - FADE_S:
-            a = max(0.0, (self._dur - elapsed) / FADE_S)
-        else:
-            a = 1.0
-        if a <= 0.01:
-            return frame
-
         try:
             out = frame.convert("RGB") if frame.mode != "RGB" else frame.copy()
-            y = H - self._h
-            strip = out.crop((0, y, W, H))
-            out.paste(Image.blend(strip, self._banner, a), (0, y))
+            # Only the top n rows are on screen; the rest is still below the edge.
+            out.paste(self._banner.crop((0, 0, W, n)), (0, H - n))
             return out
         except Exception:
             return frame
@@ -154,13 +178,18 @@ def _render_banner(doc):
     title = (doc.get("title") or "").strip()
     icon_b64 = doc.get("icon") or ""
 
-    f_title, f_text = _font(8), _font(9)
+    f_title, f_text = _font(7), _font(8)
     tmp = ImageDraw.Draw(Image.new("RGB", (1, 1)))
 
-    lines = _wrap(tmp, text, f_text, W - 6)[:2]      # two lines is the limit
-    line_h = tmp.textbbox((0, 0), "Ag", font=f_text)[3] + 1
-    h = 4 + (10 if title else 0) + len(lines) * line_h
-    h = max(14, min(34, h))
+    line_h  = tmp.textbbox((0, 0), "Ag", font=f_text)[3] + 1
+    head_h  = 9 if title else 0
+    # Keep the banner under half the panel — it's a notice, not a takeover, and
+    # whatever is behind it should still be recognisable.
+    room    = MAX_BANNER_H - 4 - head_h
+    max_ln  = max(1, room // line_h)
+    lines   = _wrap(tmp, text, f_text, W - 6)[:max_ln]
+    # Size to the content so the banner never clips a line it drew.
+    h = min(MAX_BANNER_H, max(13, 4 + head_h + len(lines) * line_h))
 
     banner = Image.new("RGB", (W, h), (10, 16, 30))
     d = ImageDraw.Draw(banner)
@@ -182,7 +211,7 @@ def _render_banner(doc):
     y = 2
     if title:
         d.text((x, y), title[:18], font=f_title, fill=(120, 190, 240))
-        y += 10
+        y += head_h
     for ln in lines:
         d.text((x, y), ln, font=f_text, fill=(255, 255, 255))
         y += line_h
@@ -208,6 +237,27 @@ def _wrap(draw, text, font, max_w):
 
 # ── Attaching to a live matrix ────────────────────────────────────────────────
 
+_ATTACHED = []      # every Toast created by attach(), for frame_delay()
+
+
+def frame_delay(default):
+    """Sleep this long instead of `default` at the end of a draw loop.
+
+    Some scripts idle at one or two frames a second, which is plenty for a
+    clock but means an animation gets a single frame and looks like a jump
+    cut. While a banner is sliding this returns a much shorter delay, then
+    goes back to the script's own pace once it settles. Costs nothing when no
+    notification is on screen.
+    """
+    try:
+        now = time.time()
+        if any(t.animating(now) for t in _ATTACHED):
+            return min(default, 1.0 / ANIM_FPS)
+    except Exception:
+        pass
+    return default
+
+
 def attach(matrix, path=NOTIFY_FILE):
     """Wrap `matrix` so every frame passes through the toast compositor.
 
@@ -223,6 +273,7 @@ def attach(matrix, path=NOTIFY_FILE):
         return matrix
     try:
         toast = Toast(path)
+        _ATTACHED.append(toast)
     except Exception:
         return matrix
 
@@ -258,24 +309,21 @@ def attach(matrix, path=NOTIFY_FILE):
 def _stamp(canvas, toast):
     """Draw the toast onto a FrameCanvas pixel by pixel.
 
-    A FrameCanvas is write-only, so there's nothing to blend against — the
-    banner is drawn at full opacity once it has faded in far enough to look
-    deliberate rather than flickering.
+    A FrameCanvas is write-only, so there is nothing to read back and blend
+    against — which is exactly why the animation is a slide. Only the rows
+    currently on screen get written, so the same motion works here as on the
+    PIL path with no compromise.
     """
     now = time.time()
     toast._poll(now)
-    if toast._banner is None:
+    n = toast._rows_visible(now)
+    if n <= 0:
         return
-    elapsed = now - toast._start
-    if elapsed > toast._dur:
-        toast._banner = None
-        return
-    if elapsed < FADE_S * 0.5 or elapsed > toast._dur - FADE_S * 0.5:
-        return                                   # skip the faint edges
     b = toast._banner
-    top = H - b.height
     px = b.load()
-    for yy in range(b.height):
+    top = H - n
+    for yy in range(n):
+        row = top + yy
         for xx in range(W):
             r, g, bl = px[xx, yy]
-            canvas.SetPixel(xx, top + yy, r, g, bl)
+            canvas.SetPixel(xx, row, r, g, bl)

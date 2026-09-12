@@ -17,10 +17,12 @@ _add_path(os.path.join(_REPO_ROOT, "matrix-common"))
 # Notification overlay. Optional on purpose — if the module or PIL is missing,
 # attach() is a no-op and the clock behaves exactly as it did before.
 try:
-    from matrix_toast import attach as _attach_toast
+    from matrix_toast import attach as _attach_toast, frame_delay as _frame_delay
 except Exception:
     def _attach_toast(m):
         return m
+    def _frame_delay(d):
+        return d
 
 # Import shared clock constants
 try:
@@ -272,7 +274,10 @@ def main():
             if frame_ctr % 600 == 0:
                 gc.collect()
 
-            time.sleep(0.5)
+            # Two frames a second is plenty for a clock, but a sliding
+            # notification needs more; _frame_delay speeds the loop up
+            # only while one is on screen.
+            time.sleep(_frame_delay(0.5))
     except KeyboardInterrupt:
         pass
 
